@@ -57,7 +57,7 @@ python test.py  --name aid --img_file your_image_path
 Download the pre-trained models using the following links and put them under```checkpoints/``` directory.
 BaiduPan link: https://pan.baidu.com/s/1OND83WeaViSUOGu7v_DJXg?pwd=skix extract code:skix
 
-- ```RS model```: AID | PatternNet | NWPU-RESISC45
+- ```RS model```: AID | PatternNet | NWPU-RESISC45 | Dsen2_CR
 - ```Natural model```: Paris StreetView | CelebA-HQ
 
 Our models are trained with images of resolution 256*256 with random regular and irregular holes.
