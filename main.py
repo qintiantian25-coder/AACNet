@@ -37,7 +37,10 @@ def setup_seed(config):
         random.seed(config.seed)
         np.random.seed(config.seed)
         torch.manual_seed(config.seed)
-        torch.cuda.manual_seed_all(config.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(config.seed)
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.cuda.manual_seed_all(config.seed)
     
     if config.cudnn_benchmark:
         torch.backends.cudnn.benchmark = True
@@ -51,7 +54,12 @@ def setup_seed(config):
 def setup_device(config):
     """设置计算设备"""
     if torch.cuda.is_available() and len(config.gpu_ids) > 0:
-        device = torch.device(f'cuda:{config.gpu_ids[0]}')
+        if getattr(config, 'distributed', False):
+            torch.cuda.set_device(config.local_rank)
+            device = torch.device(f'cuda:{config.local_rank}')
+        else:
+            torch.cuda.set_device(config.gpu_ids[0])
+            device = torch.device(f'cuda:{config.gpu_ids[0]}')
         if getattr(config, 'distributed', False):
             print(f"Using DDP on local rank {config.local_rank}, visible GPU ids: {config.gpu_ids}")
         else:
@@ -107,6 +115,7 @@ def init_distributed(config):
             raise RuntimeError('DDP 需要 CUDA 环境')
         torch.cuda.set_device(config.local_rank)
         dist.init_process_group(backend='nccl', init_method='env://')
+        torch.cuda.empty_cache()
         # DDP 下只保留当前进程绑定的单卡，避免 init_net 触发 DataParallel。
         config.gpu_ids = [config.local_rank]
         config.use_dataparallel = False
@@ -656,11 +665,11 @@ def main():
     except Exception:
         pass
     
-    # 设置随机种子
-    setup_seed(config)
-
     # 初始化分布式环境（如果通过 torchrun 启动）
     init_distributed(config)
+
+    # 设置随机种子
+    setup_seed(config)
     
     # 设置设备
     device = setup_device(config)
@@ -678,7 +687,6 @@ def main():
             test(config, device)
     finally:
         if getattr(config, 'distributed', False) and dist.is_available() and dist.is_initialized():
-            dist.barrier()
             dist.destroy_process_group()
 
 
