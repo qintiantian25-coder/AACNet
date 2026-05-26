@@ -61,9 +61,13 @@ class CheckpointManager:
 
     @staticmethod
     def _state_dict_for_model(model):
+        if hasattr(model, 'net_G'):
+            return model.net_G.module.state_dict() if isinstance(model.net_G, torch.nn.DataParallel) else model.net_G.state_dict()
         if isinstance(model, torch.nn.DataParallel):
             return model.module.state_dict()
-        return model.state_dict()
+        if hasattr(model, 'state_dict'):
+            return model.state_dict()
+        raise TypeError(f'Unsupported model type for checkpoint saving: {type(model)}')
     
     def save_checkpoint(self, model, optimizer, scheduler, epoch, metrics, is_best=False):
         """
@@ -152,17 +156,26 @@ class CheckpointManager:
         if model_state is None:
             raise KeyError(f"检查点缺少模型权重: {checkpoint_path}")
         
+        target_net = None
+        if hasattr(model, 'net_G'):
+            target_net = model.net_G
+        elif isinstance(model, torch.nn.DataParallel):
+            target_net = model.module
+        elif hasattr(model, 'load_state_dict'):
+            target_net = model
+
+        if target_net is None:
+            raise TypeError(f'Unsupported model type for checkpoint loading: {type(model)}')
+
         # 处理DataParallel前缀
-        if isinstance(model, torch.nn.DataParallel):
-            # 如果模型是DataParallel但检查点没有'module.'前缀
+        if isinstance(target_net, torch.nn.DataParallel):
             if not any(k.startswith('module.') for k in model_state.keys()):
                 model_state = {'module.' + k: v for k, v in model_state.items()}
-            model.load_state_dict(model_state)
+            target_net.load_state_dict(model_state)
         else:
-            # 如果模型不是DataParallel但检查点有'module.'前缀
             if any(k.startswith('module.') for k in model_state.keys()):
                 model_state = {k[7:]: v for k, v in model_state.items()}
-            model.load_state_dict(model_state)
+            target_net.load_state_dict(model_state)
         
         print(f"✓ 加载模型权重")
         

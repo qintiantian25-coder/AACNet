@@ -105,9 +105,6 @@ def train(config, device):
         config.continue_train = False
     
     model = create_model(config)
-    model.to(device)
-    if len(config.gpu_ids) > 1 and config.use_dataparallel:
-        model = nn.DataParallel(model, device_ids=config.gpu_ids)
     print(f"  模型: {config.model_name}")
     
     # 创建检查点管理器
@@ -387,7 +384,6 @@ def test(config, device):
         config.continue_train = False
     
     model = create_model(config)
-    model.to(device)
     model.eval()
     
     # 加载最佳检查点
