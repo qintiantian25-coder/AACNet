@@ -22,13 +22,22 @@ class AACNetBlind(BaseModel):
         """Initial the AACNet blind model"""
         BaseModel.__init__(self, opt)
 
-        self.loss_names = []
+        self.loss_names = ['l1']
         self.visual_names = ['img_m', 'img_truth', 'img_out']
         self.model_names = ['G']
         self.isTrain = opt.isTrain
 
         # 创建生成器
         self.net_G = aacnet.define_g(gpu_ids=opt.gpu_ids, image_size=(opt.image_height, opt.image_width))
+
+        if self.isTrain:
+            self.criterionL1 = nn.L1Loss()
+            self.optimizer_G = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, self.net_G.parameters()),
+                lr=opt.lr,
+                betas=(getattr(opt, 'beta1', 0.5), getattr(opt, 'beta2', 0.9))
+            )
+            self.optimizers.append(self.optimizer_G)
 
         if not self.isTrain:
             self.setup(opt)
@@ -76,6 +85,14 @@ class AACNetBlind(BaseModel):
         mask_single = self.mask[:, 0:1, :, :]
         self.img_g, self.x_outs = self.net_G(self.img_m, mask_single)
         self.img_out = self.img_g * (1 - self.mask) + self.img_truth * self.mask
+
+    def optimize_parameters(self):
+        """Optimize generator parameters for blind completion training"""
+        self.forward()
+        self.optimizer_G.zero_grad()
+        self.loss_l1 = self.criterionL1(self.img_out, self.img_truth)
+        self.loss_l1.backward()
+        self.optimizer_G.step()
 
     def get_current_visuals(self):
         """Return visualization images"""
