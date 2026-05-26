@@ -12,7 +12,7 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--continue_train', action='store_true', help='continue training: load the latest model')
 
         # learning rate and loss weight
-        parser.add_argument('--lr_policy', type=str, default='lambda', help='learning rate policy[lambda|step|plateau]')
+        parser.add_argument('--lr_policy', type=str, default='lambda', help='learning rate policy[lambda|step|plateau|exponent|cosine]')
         parser.add_argument('--lr', type=float, default=1e-5, help='initial learning rate for adam')
         parser.add_argument('--beta1', type=float, default=0.5, help='initial learning rate for adam')
         parser.add_argument('--beta2', type=float, default=0.9, help='initial learning rate for adam')

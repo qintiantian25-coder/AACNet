@@ -83,6 +83,16 @@ def get_scheduler(optimizer, opt):
         scheduler = lr_scheduler.StepLR(optimizer, step_size=opt.lr_decay_iters, gamma=0.1)
     elif opt.lr_policy == 'exponent':
         scheduler = lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
+    elif opt.lr_policy == 'cosine':
+        # Use total training iterations if provided, otherwise fall back to epoch-style fields.
+        t_max = int(getattr(opt, 'niter', 0)) + int(getattr(opt, 'niter_decay', 0))
+        if t_max <= 0:
+            t_max = int(getattr(opt, 'num_epochs', 0))
+        if t_max <= 0:
+            t_max = 1
+
+        eta_min = float(getattr(opt, 'eta_min', 0.0))
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max, eta_min=eta_min)
     else:
         raise NotImplementedError('learning rate policy [%s] is not implemented', opt.lr_policy)
     return scheduler

@@ -60,6 +60,21 @@ class ConfigLoader:
         config.batch_size = self.getint('training', 'batch_size', 2)
         config.learning_rate = self.getfloat('training', 'learning_rate', 0.0001)
         config.lr_schedule = self.get('training', 'lr_schedule', 'exponential')
+        # 兼容 BaseModel 调度器参数命名：将 lr_schedule 映射为 lr_policy
+        lr_policy_alias = {
+            'exponential': 'exponent',
+            'exp': 'exponent',
+            'cos': 'cosine',
+        }
+        schedule_key = str(config.lr_schedule).strip().lower()
+        config.lr_policy = lr_policy_alias.get(schedule_key, schedule_key)
+
+        # 供 get_scheduler 使用的参数（缺失时回退到 num_epochs）
+        config.iter_count = self.getint('training', 'iter_count', 1)
+        config.niter = self.getint('training', 'niter', config.num_epochs)
+        config.niter_decay = self.getint('training', 'niter_decay', 0)
+        config.lr_decay_iters = self.getint('training', 'lr_decay_iters', 50)
+        config.eta_min = self.getfloat('training', 'eta_min', 0.0)
         config.lr_decay_factor = self.getfloat('training', 'lr_decay_factor', 0.99)
         config.val_interval = self.getint('training', 'val_interval', 20)
         config.num_workers = self.getint('training', 'num_workers', 8)
