@@ -67,6 +67,22 @@ def setup_directories(config):
         os.makedirs(config.results_dir, exist_ok=True)
 
 
+def set_model_train_mode(model):
+    """Set the underlying network(s) to train mode."""
+    if hasattr(model, 'net_G'):
+        model.net_G.train()
+    elif hasattr(model, 'train'):
+        model.train()
+
+
+def set_model_eval_mode(model):
+    """Set the underlying network(s) to eval mode."""
+    if hasattr(model, 'net_G'):
+        model.net_G.eval()
+    elif hasattr(model, 'eval'):
+        model.eval()
+
+
 def train(config, device):
     """
     训练函数
@@ -231,7 +247,7 @@ def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
     Returns:
         avg_loss: 平均损失
     """
-    model.train()
+    set_model_train_mode(model)
     total_loss = 0.0
     num_batches = 0
     
@@ -281,7 +297,7 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
         metrics: 验证指标字典
     """
     print(f"\n验证 Epoch {epoch + 1}...")
-    model.eval()
+    set_model_eval_mode(model)
     
     psnr_list = []
     ssim_list = []
@@ -345,7 +361,7 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
         'loss': np.mean(loss_list) if loss_list else 0.0
     }
     
-    model.train()
+    set_model_train_mode(model)
     return metrics
 
 
