@@ -550,6 +550,20 @@ def main():
     
     # 打印配置
     config_loader.print_config()
+
+    # 规范 GPU id：如果 CUDA 可用但配置的 gpu_ids 超过可见数量，进行截断并提示。
+    try:
+        import torch
+        if torch.cuda.is_available():
+            visible_cnt = torch.cuda.device_count()
+            if isinstance(config.gpu_ids, (list, tuple)) and len(config.gpu_ids) > visible_cnt:
+                print(f"警告: 配置中 gpu_ids={config.gpu_ids}，但当前可见 GPU 数量为 {visible_cnt}，将截断为前 {visible_cnt} 个 id。")
+                config.gpu_ids = config.gpu_ids[:visible_cnt]
+        else:
+            # 无 CUDA 可用，清空 gpu_ids
+            config.gpu_ids = []
+    except Exception:
+        pass
     
     # 设置随机种子
     setup_seed(config)
