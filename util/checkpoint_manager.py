@@ -48,15 +48,22 @@ class CheckpointManager:
 
     def _cleanup_legacy_checkpoints(self):
         """删除旧版遗留检查点，保持目录中只剩一个 .pt 文件。"""
+        # 删除旧版遗留检查点（.pth）以及与当前 model_prefix 相关的历史文件，
+        # 以保证最终目录中只保留单一的 best_model.pt
         legacy_patterns = [
             os.path.join(self.checkpoint_dir, f'{self.model_prefix}.pth'),
             os.path.join(self.checkpoint_dir, f'{self.model_prefix}_epoch_*.pth'),
+            os.path.join(self.checkpoint_dir, f'{self.model_prefix}*.pt'),
+            os.path.join(self.checkpoint_dir, 'last_state.pt'),
         ]
         for pattern in legacy_patterns:
             for legacy_file in glob.glob(pattern):
                 try:
-                    os.remove(legacy_file)
-                    print(f"删除旧检查点: {legacy_file}")
+                    base = os.path.basename(legacy_file)
+                    # 保留 best_model.pt 与 last_state.pt，删除其他同类历史文件
+                    if base not in ('best_model.pt', 'last_state.pt'):
+                        os.remove(legacy_file)
+                        print(f"删除旧检查点: {legacy_file}")
                 except Exception:
                     pass
 
@@ -86,12 +93,14 @@ class CheckpointManager:
             metrics: 评估指标字典
             is_best: 是否是最好的模型
         """
-        save_path = os.path.join(self.checkpoint_dir, f'{self.model_prefix}.pt')
+        # 保存 last_state.pt 用于恢复训练；仅在 is_best 时更新 best_model.pt
+        best_path = os.path.join(self.checkpoint_dir, 'best_model.pt')
+        last_path = os.path.join(self.checkpoint_dir, 'last_state.pt')
 
         checkpoint = {}
-        if os.path.exists(save_path):
+        if os.path.exists(last_path):
             try:
-                checkpoint = torch.load(save_path, map_location='cpu')
+                checkpoint = torch.load(last_path, map_location='cpu')
             except Exception:
                 checkpoint = {}
 
@@ -125,14 +134,19 @@ class CheckpointManager:
             'best_scheduler_state_dict': self.best_scheduler_state_dict,
             'best_metrics': self.best_metrics,
         })
-
-        torch.save(checkpoint, save_path)
+        # 总是保存 last_state.pt（用于恢复训练），但只在 is_best 时写入 best_model.pt
+        try:
+            torch.save(checkpoint, last_path)
+        except Exception:
+            pass
 
         if is_best:
-            print(f"✓ 当前验证更新了最佳模型: {save_path}")
+            try:
+                torch.save(checkpoint, best_path)
+            except Exception:
+                pass
+            print(f"✓ 当前验证更新了最佳模型: {best_path}")
             print(f"  {self.metric_name}: {self.best_metric_value:.4f}")
-        else:
-            print(f"  已更新训练状态到: {save_path}")
     
     def load_checkpoint(self, checkpoint_path, model, optimizer=None, scheduler=None, load_weights_only=False, use_best=False):
         """
