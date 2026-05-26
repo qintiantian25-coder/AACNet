@@ -382,7 +382,7 @@ def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
         
         # 定期输出日志
         if logger is not None and (batch_idx + 1) % config.print_freq == 0:
-            logger.log(f"  Epoch {epoch + 1} [{batch_idx + 1}/{len(dataloader)}] - Loss: {total_loss / num_batches:.4f}")
+            logger.log(f"  Epoch {epoch + 1} [{batch_idx + 1}/{len(dataloader)}] - Loss: {total_loss / num_batches:.6f}")
     
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     return avg_loss

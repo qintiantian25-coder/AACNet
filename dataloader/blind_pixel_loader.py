@@ -68,6 +68,9 @@ class BlindPixelDataset(data.Dataset):
         # 收集所有数据（按子文件夹组织）
         self.img_groups = self._collect_images()
         self.total_images = sum(len(imgs) for imgs in self.img_groups.values())
+        self.total_mask_files = getattr(self, 'total_mask_files', 0)
+        self.missing_mask_files = getattr(self, 'missing_mask_files', 0)
+        self.missing_mask_ratio = (self.missing_mask_files / self.total_images) if self.total_images > 0 else 0.0
         
         print(f"Loaded {self.phase} dataset:")
         print(f"  Total groups: {len(self.img_groups)}")
@@ -75,6 +78,16 @@ class BlindPixelDataset(data.Dataset):
         print(f"  Blur dir: {self.blur_dir}")
         print(f"  Sharp dir: {self.sharp_dir}")
         print(f"  Mask dir: {self.mask_dir}")
+        if self.total_images > 0:
+            print(f"  Mask files found: {self.total_mask_files}/{self.total_images}")
+            if self.missing_mask_files > 0:
+                print(f"  Warning: {self.missing_mask_files} samples have no mask file and will fall back to an all-ones mask")
+            if self.missing_mask_ratio >= 1.0:
+                raise RuntimeError(
+                    f"{self.phase} dataset contains no mask files at all. "
+                    f"Check config paths: {self.mask_dir} and the per-sample mask filenames. "
+                    "Without masks, the training target becomes identical to the input and L1 will stay at 0."
+                )
     
     def _collect_images(self):
         """收集所有图像，按子文件夹（001, 002等）分组"""
@@ -97,10 +110,18 @@ class BlindPixelDataset(data.Dataset):
                 for img_name in img_names:
                     blur_path = os.path.join(blur_subdir, img_name)
                     sharp_path = os.path.join(sharp_subdir, img_name)
+                    mask_path = os.path.join(mask_subdir, img_name)
                     
                     # 验证文件存在
                     if os.path.exists(blur_path) and os.path.exists(sharp_path):
-                        mask_path = os.path.join(mask_subdir, img_name)
+                        if not hasattr(self, 'total_mask_files'):
+                            self.total_mask_files = 0
+                        if not hasattr(self, 'missing_mask_files'):
+                            self.missing_mask_files = 0
+                        if os.path.exists(mask_path):
+                            self.total_mask_files += 1
+                        else:
+                            self.missing_mask_files += 1
                         img_list.append({
                             'blur': blur_path,
                             'sharp': sharp_path,
