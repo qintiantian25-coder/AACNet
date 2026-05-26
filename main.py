@@ -114,26 +114,30 @@ def train(config, device):
     checkpoint_manager = CheckpointManager(config, config.best_metric)
     
     # 创建日志记录器
-    logger = Logger(config)
+    train_logger = Logger(config, log_name='training')
+    val_logger = Logger(config, log_name='validation')
+    train_logger.log_config(config)
     
     # 恢复训练（如果启用）
     start_epoch = 0
     if config.resume_training and config.checkpoint_path:
-        print(f"\n从检查点恢复: {config.checkpoint_path}")
+        print(f"\n从训练状态恢复: {config.checkpoint_path}")
         start_epoch = checkpoint_manager.load_checkpoint(
             config.checkpoint_path,
             model,
-            load_weights_only=config.load_weights_only
+            load_weights_only=config.load_weights_only,
+            use_best=False
         )
     elif config.resume_training:
-        # 自动寻找最新的检查点
+        # 自动寻找最新的训练状态文件
         latest_ckpt = checkpoint_manager.find_latest_checkpoint()
         if latest_ckpt:
-            print(f"\n从检查点恢复: {latest_ckpt}")
+            print(f"\n从最新训练状态恢复: {latest_ckpt}")
             start_epoch = checkpoint_manager.load_checkpoint(
                 latest_ckpt,
                 model,
-                load_weights_only=config.load_weights_only
+                load_weights_only=config.load_weights_only,
+                use_best=False
             )
     
     # 训练循环
@@ -142,20 +146,32 @@ def train(config, device):
     
     best_metric = None
     metric_calc = MetricCalculator(config.crop_border)
+    optimizer = getattr(model, 'optimizers', [None])[0] if hasattr(model, 'optimizers') and len(getattr(model, 'optimizers', [])) > 0 else None
+    scheduler = getattr(model, 'schedulers', [None])[0] if hasattr(model, 'schedulers') and len(getattr(model, 'schedulers', [])) > 0 else None
     
     for epoch in range(start_epoch, config.num_epochs):
         # 训练阶段
-        train_loss = train_epoch(model, train_loader, None, device, config, epoch, logger)
+        train_loss = train_epoch(model, train_loader, optimizer, device, config, epoch, train_logger)
         
         # 获取当前学习率
         if hasattr(model, 'schedulers') and len(model.schedulers) > 0:
             model.update_learning_rate()
             current_lr = model.optimizers[0].param_groups[0]['lr']
-            logger.log(f"Epoch {epoch + 1}/{config.num_epochs} - LR: {current_lr:.6f}")
+            train_logger.log(f"Epoch {epoch + 1}/{config.num_epochs} - LR: {current_lr:.6f}")
+
+        # 保存当前训练状态到单一检查点文件，便于随时续训
+        checkpoint_manager.save_checkpoint(
+            model,
+            optimizer,
+            scheduler,
+            epoch + 1,
+            {'loss': train_loss},
+            is_best=False
+        )
         
         # 验证阶段（每val_interval轮进行一次）
         if (epoch + 1) % config.val_interval == 0:
-            val_metrics = validate(model, val_loader, device, config, epoch, logger, metric_calc)
+            val_metrics = validate(model, val_loader, device, config, epoch, train_logger, val_logger, metric_calc)
             
             # 检查是否是最好的模型
             current_metric = val_metrics[config.best_metric]
@@ -178,22 +194,28 @@ def train(config, device):
             if is_best or not config.save_best_only:
                 checkpoint_manager.save_checkpoint(
                     model,
-                    None,
-                    None,
+                    optimizer,
+                    scheduler,
                     epoch + 1,
                     val_metrics,
                     is_best=is_best
                 )
                 
                 if is_best:
-                    logger.log(f"✓ 保存新的最佳模型! {config.best_metric}={current_metric:.4f}")
+                    train_logger.log(f"✓ 本次验证刷新最佳模型: {config.best_metric}={current_metric:.4f}，已更新 best_model.pt")
+                    val_logger.log(f"✓ 本次验证刷新最佳模型: {config.best_metric}={current_metric:.4f}，已更新 best_model.pt")
+                else:
+                    train_logger.log(f"本次验证未刷新最佳模型: {config.best_metric}={current_metric:.4f}, 当前最佳={best_metric:.4f}")
+                    val_logger.log(f"本次验证未刷新最佳模型: {config.best_metric}={current_metric:.4f}, 当前最佳={best_metric:.4f}")
         
-        logger.log(f"Epoch {epoch + 1}/{config.num_epochs} - Train Loss: {train_loss:.4f}")
+        train_logger.log(f"Epoch {epoch + 1}/{config.num_epochs} - Train Loss: {train_loss:.4f}")
     
     print("-" * 60)
-    print(f"✓ 训练完成! 最佳模型已保存到 {config.checkpoint_dir}")
-    logger.log("Training completed!")
-    logger.save_and_close()
+    print(f"✓ 训练完成，单一检查点文件: {os.path.join(config.checkpoint_dir, f'{config.model_prefix}.pt')}（包含最新训练状态与最佳模型权重）")
+    train_logger.log("Training completed!")
+    val_logger.log("Validation logging completed!")
+    train_logger.save_and_close()
+    val_logger.save_and_close()
 
 
 def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
@@ -245,7 +267,7 @@ def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
     return avg_loss
 
 
-def validate(model, dataloader, device, config, epoch, logger, metric_calc):
+def validate(model, dataloader, device, config, epoch, train_logger, val_logger, metric_calc):
     """
     验证函数
     
@@ -312,7 +334,13 @@ def validate(model, dataloader, device, config, epoch, logger, metric_calc):
     avg_psnr = np.mean(psnr_list) if psnr_list else 0.0
     avg_ssim = np.mean(ssim_list) if ssim_list else 0.0
     
-    logger.log(f"验证结果 - PSNR: {avg_psnr:.4f}, SSIM: {avg_ssim:.4f}")
+    print(f"当前验证指标 - PSNR: {avg_psnr:.4f}, SSIM: {avg_ssim:.4f}, LOSS: {metrics['loss']:.4f}")
+    val_logger.log_validation(epoch, metrics={
+        'psnr': avg_psnr,
+        'ssim': avg_ssim,
+        'loss': np.mean(loss_list) if loss_list else 0.0
+    })
+    train_logger.log(f"验证结果 - PSNR: {avg_psnr:.4f}, SSIM: {avg_ssim:.4f}")
     
     metrics = {
         'psnr': avg_psnr,
@@ -367,10 +395,10 @@ def test(config, device):
     best_ckpt = checkpoint_manager.find_best_checkpoint()
     
     if best_ckpt:
-        print(f"加载检查点: {best_ckpt}")
-        checkpoint_manager.load_checkpoint(best_ckpt, model, load_weights_only=True)
+        print(f"加载 best_model.pt 中的最佳模型权重: {best_ckpt}")
+        checkpoint_manager.load_checkpoint(best_ckpt, model, load_weights_only=True, use_best=True)
     else:
-        print("警告: 未找到检查点，使用随机初始化的模型")
+        print("警告: 未找到 best_model.pt，使用随机初始化的模型")
     
     # 创建指标计算器
     metric_calc = MetricCalculator(config.crop_border)
@@ -519,6 +547,8 @@ def main():
     
     # 创建必要的目录
     setup_directories(config)
+
+    # 确保检查点目录中只保留单一 best_model.pt，历史遗留文件已经在 CheckpointManager 中清理
     
     # 运行训练或测试
     if args.train:

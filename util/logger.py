@@ -9,22 +9,24 @@ from datetime import datetime
 class Logger:
     """日志记录类"""
     
-    def __init__(self, config):
+    def __init__(self, config, log_name='training'):
         """
         初始化日志记录器
         
         Args:
             config: 配置对象
+            log_name: 日志文件前缀，例如 training / validation
         """
         self.config = config
         self.log_dir = config.log_dir
         self.log_file = None
+        self.log_name = log_name
         
         os.makedirs(self.log_dir, exist_ok=True)
         
         # 创建日志文件
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_filename = f'training_{timestamp}.log'
+        log_filename = f'{self.log_name}_{timestamp}.log'
         self.log_path = os.path.join(self.log_dir, log_filename)
         
         # 打开日志文件
@@ -32,7 +34,7 @@ class Logger:
         
         # 记录初始信息
         self.log("="*60)
-        self.log(f"AACNet 盲元补完网络 - 训练日志")
+        self.log(f"AACNet 盲元补完网络 - {self.log_name}日志")
         self.log("="*60)
         self.log(f"开始时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self.log(f"日志文件: {self.log_path}")
