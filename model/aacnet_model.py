@@ -28,7 +28,7 @@ class AACNetBlind(BaseModel):
         self.isTrain = opt.isTrain
 
         # 创建生成器
-        self.net_G = aacnet.define_g(gpu_ids=opt.gpu_ids)
+        self.net_G = aacnet.define_g(gpu_ids=opt.gpu_ids, image_size=(opt.image_height, opt.image_width))
 
         if not self.isTrain:
             self.setup(opt)

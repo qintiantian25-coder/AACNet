@@ -8,8 +8,8 @@ import numpy as np
 from model.dat_blocks import DAttentionBaseline_gate_factor
 from timm.models.layers import to_2tuple, trunc_normal_
 
-def define_g(init_type='normal', gpu_ids=[]):
-    net = Generator(ngf=48)
+def define_g(init_type='normal', gpu_ids=[], image_size=(512, 640)):
+    net = Generator(ngf=48, image_size=image_size)
     return init_net(net, init_type, gpu_ids)
 
 
@@ -18,8 +18,14 @@ def define_d(init_type= 'normal', gpu_ids=[]):
     return init_net(net, init_type, gpu_ids)
 
 class Generator(nn.Module):
-    def __init__(self, ngf=48):
+    def __init__(self, ngf=48, image_size=(512, 640)):
         super().__init__()
+
+        input_h, input_w = image_size
+        fmap_h = input_h // 8
+        fmap_w = input_w // 8
+        if input_h % 8 != 0 or input_w % 8 != 0:
+            raise ValueError(f"image_size must be divisible by 8, got {image_size}")
 
         self.start = ResBlock0_v2(in_ch=4, out_ch=ngf, kernel_size=5, stride=1, padding=2)
 
@@ -40,7 +46,8 @@ class Generator(nn.Module):
         )
         self.down32 = Downsample(num_ch=ngf*4)  # B *8ngf * 32, 32
         self.middle1 = ResBlock_v2(in_ch=ngf * 8, out_ch=ngf * 8, kernel_size=3, stride=1, padding=1)
-        fmap_size = to_2tuple(32)
+        # 3次下采样后，特征图尺寸按 (H, W) 传递，避免高宽反写
+        fmap_size = (fmap_h, fmap_w)
         heads=12
         hc = int(ngf * 8/heads)
         n_groups = int(3)

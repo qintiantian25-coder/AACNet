@@ -65,7 +65,7 @@ class Pluralistic(BaseModel):
         self.distribution = []
         self.istrans = False
 
-        self.net_G = aacnet.define_g(gpu_ids=opt.gpu_ids)  # ada-RS-ab-B-4
+        self.net_G = aacnet.define_g(gpu_ids=opt.gpu_ids, image_size=(opt.image_height, opt.image_width))  # ada-RS-ab-B-4
 
         # define the discriminator model
         self.net_D = network.define_d_msg(gpu_ids=opt.gpu_ids)

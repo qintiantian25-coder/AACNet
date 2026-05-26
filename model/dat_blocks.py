@@ -183,6 +183,15 @@ class DAttentionBaseline_gate_factor(nn.Module):
                 attn = attn + attn_bias.reshape(B * self.n_heads, H * W, self.n_sample)
             else:
                 rpe_table = self.rpe_table
+                expected_h = 2 * H - 1
+                expected_w = 2 * W - 1
+                if rpe_table.shape[-2:] != (expected_h, expected_w):
+                    rpe_table = F.interpolate(
+                        rpe_table.unsqueeze(0),
+                        size=(expected_h, expected_w),
+                        mode='bilinear',
+                        align_corners=True
+                    ).squeeze(0)
                 rpe_bias = rpe_table[None, ...].expand(B, -1, -1, -1)
 
                 q_grid = self._get_ref_points(H, W, B, dtype, device)
