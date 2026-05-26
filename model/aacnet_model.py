@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.cuda.amp import autocast, GradScaler
 from model.base_model import BaseModel
 from model import aacnet
 from util import util
@@ -26,6 +27,8 @@ class AACNetBlind(BaseModel):
         self.visual_names = ['img_m', 'img_truth', 'img_out']
         self.model_names = ['G']
         self.isTrain = opt.isTrain
+        self.use_amp = bool(getattr(opt, 'mixed_precision', False) and torch.cuda.is_available())
+        self.scaler = GradScaler(enabled=self.use_amp)
 
         # 创建生成器
         self.net_G = aacnet.define_g(gpu_ids=opt.gpu_ids, image_size=(opt.image_height, opt.image_width))
@@ -88,11 +91,18 @@ class AACNetBlind(BaseModel):
 
     def optimize_parameters(self):
         """Optimize generator parameters for blind completion training"""
-        self.forward()
-        self.optimizer_G.zero_grad()
-        self.loss_l1 = self.criterionL1(self.img_out, self.img_truth)
-        self.loss_l1.backward()
-        self.optimizer_G.step()
+        self.optimizer_G.zero_grad(set_to_none=True)
+        with autocast(enabled=self.use_amp):
+            self.forward()
+            self.loss_l1 = self.criterionL1(self.img_out, self.img_truth)
+
+        if self.use_amp:
+            self.scaler.scale(self.loss_l1).backward()
+            self.scaler.step(self.optimizer_G)
+            self.scaler.update()
+        else:
+            self.loss_l1.backward()
+            self.optimizer_G.step()
 
     def get_current_visuals(self):
         """Return visualization images"""
