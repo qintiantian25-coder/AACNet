@@ -61,7 +61,7 @@ def setup_device(config):
             torch.cuda.set_device(config.gpu_ids[0])
             device = torch.device(f'cuda:{config.gpu_ids[0]}')
         if getattr(config, 'distributed', False):
-            print(f"Using DDP on local rank {config.local_rank}, visible GPU ids: {config.gpu_ids}")
+            print(f"Using DDP on local rank {config.local_rank}, current cuda device: {torch.cuda.current_device()}, visible GPU ids: {config.gpu_ids}")
         else:
             print(f"Using GPU: {config.gpu_ids}")
     else:
@@ -186,6 +186,13 @@ def train(config, device):
         config.continue_train = False
     
     model = create_model(config)
+
+    # ==================== 显存优化核心修改位置 ====================
+    # 在扔进 DDP 包装之前，必须先把底层的 net_G 移动到当前 rank 分配的单卡设备上。
+    if hasattr(model, 'net_G'):
+        model.net_G = model.net_G.to(device)
+    # ============================================================
+    
     if is_distributed and config.world_size > 1 and hasattr(model, 'net_G'):
         model.net_G = DDP(
             model.net_G,
@@ -437,8 +444,11 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
             psnr = metric_calc.calculate_psnr(output_uint8, target_uint8)
             ssim = metric_calc.calculate_ssim(output_uint8, target_uint8)
             
-            psnr_list.append(psnr)
-            ssim_list.append(ssim)
+            # 异常值防护
+            if np.isfinite(psnr):
+                psnr_list.append(psnr)
+            if np.isfinite(ssim):
+                ssim_list.append(ssim)
             
             # 保存验证可视化结果
             if config.save_val_visual and batch_idx < 5:  # 只保存前5张
@@ -500,7 +510,12 @@ def test(config, device):
         config.continue_train = False
     
     model = create_model(config)
-    model.eval()
+    
+    # 单卡模式下测试：将底层子网络分配到单卡对应设备上
+    if hasattr(model, 'net_G'):
+        model.net_G = model.net_G.to(device)
+        
+    set_model_eval_mode(model)
     
     # 加载最佳检查点
     checkpoint_manager = CheckpointManager(config, config.best_metric)
@@ -559,8 +574,10 @@ def test(config, device):
             psnr = metric_calc.calculate_psnr(output_uint8, target_uint8)
             ssim = metric_calc.calculate_ssim(output_uint8, target_uint8)
             
-            psnr_list.append(psnr)
-            ssim_list.append(ssim)
+            if np.isfinite(psnr):
+                psnr_list.append(psnr)
+            if np.isfinite(ssim):
+                ssim_list.append(ssim)
             
             # 保存结果
             if config.save_results:
@@ -677,8 +694,6 @@ def main():
     # 创建必要的目录
     setup_directories(config)
 
-    # 确保检查点目录中只保留单一 best_model.pt，历史遗留文件已经在 CheckpointManager 中清理
-    
     # 运行训练或测试
     try:
         if args.train:
