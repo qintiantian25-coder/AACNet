@@ -398,7 +398,8 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
         device: 计算设备
         config: 配置
         epoch: 当前epoch
-        logger: 日志记录器
+        train_logger: 训练日志记录器
+        val_logger: 验证日志记录器
         metric_calc: 指标计算器
     
     Returns:
@@ -427,6 +428,12 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
             # 前向传播
             model.set_input(input_data)
             model.test()
+            
+            # === 新增：获取当前验证 batch 的验证损失，填补原本空白的 loss_list ===
+            loss_dict = model.get_current_errors()
+            if loss_dict:
+                loss_list.append(sum(loss_dict.values()))
+            # ================================================================
             
             # 获取输出
             output = model.img_out  # [-1, 1]
@@ -458,7 +465,9 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
     avg_psnr = np.mean(psnr_list) if psnr_list else 0.0
     avg_ssim = np.mean(ssim_list) if ssim_list else 0.0
     
-    avg_loss = np.mean(loss_list) if loss_list else 0.0
+    # === 健壮性增强：确保 loss_list 确实有数据才计算平均值，防止空列表计算报错 ===
+    avg_loss = np.mean(loss_list) if (loss_list and len(loss_list) > 0) else 0.0
+    
     metrics = {
         'psnr': avg_psnr,
         'ssim': avg_ssim,

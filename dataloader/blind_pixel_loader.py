@@ -14,6 +14,10 @@ import random
 import csv
 
 
+def natural_sort_key(s):
+    return [int(text) if text.isdigit() else text.lower() for text in __import__('re').split('([0-9]+)', s)]
+
+
 class BlindPixelDataset(data.Dataset):
     """盲元补完数据集"""
     
@@ -64,13 +68,28 @@ class BlindPixelDataset(data.Dataset):
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         ])
+
+        # 预加载根目录兜底的盲元坐标/闪点坐标。
+        # 实际优先读取每个 group 目录下的 mask 文件。
+        self.root_blind_coords = self._load_coords_csv(self._resolve_optional_path(
+            [
+                os.path.join(self.mask_dir, config.static_coords_file),
+                os.path.join(self.data_root, config.static_coords_file),
+                config.static_coords_file,
+            ]
+        ))
+        self.root_flash_map = self._load_flash_csv(self._resolve_optional_path(
+            [
+                os.path.join(self.mask_dir, config.dynamic_coords_file),
+                os.path.join(self.data_root, config.dynamic_coords_file),
+                config.dynamic_coords_file,
+            ]
+        ))
+        self._mask_cache = {}
         
         # 收集所有数据（按子文件夹组织）
         self.img_groups = self._collect_images()
         self.total_images = sum(len(imgs) for imgs in self.img_groups.values())
-        self.total_mask_files = getattr(self, 'total_mask_files', 0)
-        self.missing_mask_files = getattr(self, 'missing_mask_files', 0)
-        self.missing_mask_ratio = (self.missing_mask_files / self.total_images) if self.total_images > 0 else 0.0
         
         print(f"Loaded {self.phase} dataset:")
         print(f"  Total groups: {len(self.img_groups)}")
@@ -78,16 +97,7 @@ class BlindPixelDataset(data.Dataset):
         print(f"  Blur dir: {self.blur_dir}")
         print(f"  Sharp dir: {self.sharp_dir}")
         print(f"  Mask dir: {self.mask_dir}")
-        if self.total_images > 0:
-            print(f"  Mask files found: {self.total_mask_files}/{self.total_images}")
-            if self.missing_mask_files > 0:
-                print(f"  Warning: {self.missing_mask_files} samples have no mask file and will fall back to an all-ones mask")
-            if self.missing_mask_ratio >= 1.0:
-                raise RuntimeError(
-                    f"{self.phase} dataset contains no mask files at all. "
-                    f"Check config paths: {self.mask_dir} and the per-sample mask filenames. "
-                    "Without masks, the training target becomes identical to the input and L1 will stay at 0."
-                )
+        print("  Mask source: group-level blind_pixel_mask.png + blind_pixel_coords.csv + flash_pixel_coords.csv")
     
     def _collect_images(self):
         """收集所有图像，按子文件夹（001, 002等）分组"""
@@ -100,32 +110,21 @@ class BlindPixelDataset(data.Dataset):
         for subdir in subdirs:
             blur_subdir = os.path.join(self.blur_dir, subdir)
             sharp_subdir = os.path.join(self.sharp_dir, subdir)
-            mask_subdir = os.path.join(self.mask_dir, subdir)
             
             # 收集该子文件夹下的所有PNG文件
             if os.path.isdir(blur_subdir):
-                img_names = sorted([f for f in os.listdir(blur_subdir) if f.endswith('.png')])
+                img_names = sorted([f for f in os.listdir(blur_subdir) if f.lower().endswith('.png')], key=natural_sort_key)
                 
                 img_list = []
                 for img_name in img_names:
                     blur_path = os.path.join(blur_subdir, img_name)
                     sharp_path = os.path.join(sharp_subdir, img_name)
-                    mask_path = os.path.join(mask_subdir, img_name)
                     
                     # 验证文件存在
                     if os.path.exists(blur_path) and os.path.exists(sharp_path):
-                        if not hasattr(self, 'total_mask_files'):
-                            self.total_mask_files = 0
-                        if not hasattr(self, 'missing_mask_files'):
-                            self.missing_mask_files = 0
-                        if os.path.exists(mask_path):
-                            self.total_mask_files += 1
-                        else:
-                            self.missing_mask_files += 1
                         img_list.append({
                             'blur': blur_path,
                             'sharp': sharp_path,
-                            'mask': mask_path if os.path.exists(mask_path) else None,
                             'group': subdir,
                             'name': img_name
                         })
@@ -134,6 +133,145 @@ class BlindPixelDataset(data.Dataset):
                     img_groups[subdir] = img_list
         
         return img_groups
+
+    def _resolve_optional_path(self, candidates):
+        for candidate in candidates:
+            if candidate and os.path.exists(candidate):
+                return candidate
+        return None
+
+    def _load_coords_csv(self, csv_path):
+        if not csv_path or not os.path.exists(csv_path):
+            return None
+        coords = []
+        try:
+            with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
+                reader = csv.DictReader(f)
+                if reader.fieldnames is None or 'x' not in reader.fieldnames or 'y' not in reader.fieldnames:
+                    return None
+                for row in reader:
+                    try:
+                        coords.append((int(float(row['x'])), int(float(row['y']))))
+                    except Exception:
+                        continue
+        except Exception:
+            return None
+        if len(coords) == 0:
+            return None
+        return np.unique(np.array(coords, dtype=np.int32), axis=0)
+
+    def _load_flash_csv(self, csv_path):
+        if not csv_path or not os.path.exists(csv_path):
+            return {}
+        flash_map = {}
+        try:
+            with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
+                reader = csv.DictReader(f)
+                if reader.fieldnames is None or 'frame_name' not in reader.fieldnames or 'x' not in reader.fieldnames or 'y' not in reader.fieldnames:
+                    return {}
+                for row in reader:
+                    try:
+                        fname = os.path.basename(str(row['frame_name']))
+                        x = int(float(row['x']))
+                        y = int(float(row['y']))
+                    except Exception:
+                        continue
+                    flash_map.setdefault(fname, set()).add((x, y))
+        except Exception:
+            return {}
+        return {k: list(v) for k, v in flash_map.items()}
+
+    def _create_mask_from_coords(self, coords, shape):
+        mask = np.ones(shape, dtype=np.float32)
+        if coords is None or len(coords) == 0:
+            return mask
+        h, w = shape
+        xs = coords[:, 0]
+        ys = coords[:, 1]
+        valid = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+        if np.any(valid):
+            mask[ys[valid], xs[valid]] = 0.0
+        return mask
+
+    def _load_group_mask_sources(self, group_name):
+        group_mask_dir = os.path.join(self.mask_dir, group_name)
+        static_mask_path = None
+        static_coords_path = None
+        flash_coords_path = None
+
+        if os.path.isdir(group_mask_dir):
+            for candidate in [
+                os.path.join(group_mask_dir, 'blind_pixel_mask.png'),
+                os.path.join(group_mask_dir, 'mask.png'),
+            ]:
+                if os.path.exists(candidate):
+                    static_mask_path = candidate
+                    break
+
+            for candidate in [
+                os.path.join(group_mask_dir, 'blind_pixel_coords.csv'),
+                os.path.join(group_mask_dir, 'blind_coords.csv'),
+            ]:
+                if os.path.exists(candidate):
+                    static_coords_path = candidate
+                    break
+
+            for candidate in [
+                os.path.join(group_mask_dir, 'flash_pixel_coords.csv'),
+                os.path.join(group_mask_dir, 'flash_coords.csv'),
+            ]:
+                if os.path.exists(candidate):
+                    flash_coords_path = candidate
+                    break
+
+        return static_mask_path, static_coords_path, flash_coords_path
+
+    def _load_group_mask(self, group_name, frame_name, shape):
+        cache_key = (group_name, frame_name, shape)
+        if cache_key in self._mask_cache:
+            return self._mask_cache[cache_key]
+
+        static_mask_path, static_coords_path, flash_coords_path = self._load_group_mask_sources(group_name)
+
+        mask = None
+        if static_mask_path and os.path.exists(static_mask_path):
+            mask_img = cv2.imread(static_mask_path, cv2.IMREAD_GRAYSCALE)
+            if mask_img is not None:
+                if mask_img.shape != shape:
+                    mask_img = cv2.resize(mask_img, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
+                # 盲元图中白色(255)表示盲元；模型需要的 mask 是有效区域=1，因此这里取反。
+                mask = (mask_img <= 127).astype(np.float32)
+
+        if mask is None and static_coords_path and os.path.exists(static_coords_path):
+            coords = self._load_coords_csv(static_coords_path)
+            if coords is not None:
+                mask = self._create_mask_from_coords(coords, shape)
+
+        if mask is None and self.root_blind_coords is not None:
+            mask = self._create_mask_from_coords(self.root_blind_coords, shape)
+
+        if mask is None:
+            raise RuntimeError(
+                f"Cannot find a valid mask source for group '{group_name}'. "
+                f"Expected {os.path.join(self.mask_dir, group_name, 'blind_pixel_mask.png')} "
+                f"or a blind coords CSV."
+            )
+
+        flash_map = {}
+        if flash_coords_path and os.path.exists(flash_coords_path):
+            flash_map = self._load_flash_csv(flash_coords_path)
+        elif self.root_flash_map:
+            flash_map = self.root_flash_map
+
+        flash_coords = flash_map.get(frame_name, [])
+        if len(flash_coords) > 0:
+            flash_coords = np.array(flash_coords, dtype=np.int32)
+            flash_mask = self._create_mask_from_coords(flash_coords, shape)
+            mask = np.minimum(mask, flash_mask)
+
+        mask_tensor = torch.from_numpy(mask).unsqueeze(0).float()
+        self._mask_cache[cache_key] = mask_tensor
+        return mask_tensor
     
     def __len__(self):
         """返回数据集大小"""
@@ -188,8 +326,8 @@ class BlindPixelDataset(data.Dataset):
             blur_tensor = self.transform_test(blur_pil)
             sharp_tensor = self.transform_test(sharp_pil)
         
-        # 加载或创建mask
-        mask_tensor = self._load_mask(img_info['mask'], (self.image_height, self.image_width))
+        # 按 group 目录读取 mask，并叠加 frame 对应的 flash 像素记录
+        mask_tensor = self._load_group_mask(img_info['group'], img_info['name'], (self.image_height, self.image_width))
         
         # 返回字典
         return {
@@ -200,33 +338,6 @@ class BlindPixelDataset(data.Dataset):
             'group': img_info['group'],
             'name': img_info['name']
         }
-    
-    def _load_mask(self, mask_path, shape):
-        """
-        加载mask
-        
-        Args:
-            mask_path: mask文件路径
-            shape: 期望的输出形状 (H, W)
-        
-        Returns:
-            mask_tensor: [1, H, W]，1表示有效区域，0表示盲元
-        """
-        if mask_path and os.path.exists(mask_path):
-            mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-            if mask_img is not None:
-                # 确保尺寸正确
-                if mask_img.shape != shape:
-                    mask_img = cv2.resize(mask_img, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
-                
-                # 二值化：假设 0 = 盲元，>127 = 有效
-                mask = (mask_img > 127).astype(np.float32)
-                mask_tensor = torch.from_numpy(mask).unsqueeze(0)  # [1, H, W]
-                return mask_tensor
-        
-        # 如果没有mask文件，返回全1的mask（表示全部有效）
-        mask_tensor = torch.ones((1, shape[0], shape[1]), dtype=torch.float32)
-        return mask_tensor
     
     def _get_empty_sample(self):
         """返回空样本（当图像加载失败时）"""

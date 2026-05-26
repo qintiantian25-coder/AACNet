@@ -131,7 +131,9 @@ def load_mask_image_or_create(mask_path, img_shape):
     if mask_path and os.path.exists(mask_path):
         mask_img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if mask_img is not None:
-            mask = (mask_img > 127).astype(np.float32)
+            # 数据集中 mask 图像中 255 表示盲元位置（需要修复为模型期望的语义：1 表示有效区域）
+            # 因此这里取反：mask_img <= 127 -> 有效区域为 1
+            mask = (mask_img <= 127).astype(np.float32)
             if mask.shape != img_shape:
                 mask = cv2.resize(mask, (img_shape[1], img_shape[0]), interpolation=cv2.INTER_NEAREST)
             return mask
