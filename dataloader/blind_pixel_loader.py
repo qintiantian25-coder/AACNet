@@ -219,7 +219,7 @@ class BlindPixelDataset(data.Dataset):
         }
 
 
-def create_dataloader(config, phase='train', shuffle=None):
+def create_dataloader(config, phase='train', shuffle=None, sampler=None):
     """
     创建数据加载器
     
@@ -248,7 +248,8 @@ def create_dataloader(config, phase='train', shuffle=None):
     dataloader = data.DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=(shuffle if sampler is None else False),
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=True,
         drop_last=(phase == 'train')  # 训练时丢弃不完整的batch

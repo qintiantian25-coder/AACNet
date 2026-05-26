@@ -5,6 +5,7 @@
 import os
 import torch
 import glob
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 class CheckpointManager:
@@ -62,8 +63,12 @@ class CheckpointManager:
     @staticmethod
     def _state_dict_for_model(model):
         if hasattr(model, 'net_G'):
-            return model.net_G.module.state_dict() if isinstance(model.net_G, torch.nn.DataParallel) else model.net_G.state_dict()
+            if isinstance(model.net_G, (torch.nn.DataParallel, DDP)):
+                return model.net_G.module.state_dict()
+            return model.net_G.state_dict()
         if isinstance(model, torch.nn.DataParallel):
+            return model.module.state_dict()
+        if isinstance(model, DDP):
             return model.module.state_dict()
         if hasattr(model, 'state_dict'):
             return model.state_dict()
@@ -161,6 +166,8 @@ class CheckpointManager:
             target_net = model.net_G
         elif isinstance(model, torch.nn.DataParallel):
             target_net = model.module
+        elif isinstance(model, DDP):
+            target_net = model.module
         elif hasattr(model, 'load_state_dict'):
             target_net = model
 
@@ -168,7 +175,7 @@ class CheckpointManager:
             raise TypeError(f'Unsupported model type for checkpoint loading: {type(model)}')
 
         # 处理DataParallel前缀
-        if isinstance(target_net, torch.nn.DataParallel):
+        if isinstance(target_net, (torch.nn.DataParallel, DDP)):
             if not any(k.startswith('module.') for k in model_state.keys()):
                 model_state = {'module.' + k: v for k, v in model_state.items()}
             target_net.load_state_dict(model_state)

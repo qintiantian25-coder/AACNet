@@ -18,10 +18,13 @@ import csv
 import cv2
 from datetime import datetime
 import shutil
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 # 导入项目模块
 from util.config_loader import ConfigLoader
-from dataloader.blind_pixel_loader import create_dataloader
+from dataloader.blind_pixel_loader import BlindPixelDataset, create_dataloader
 from model import create_model
 from util.metrics import MetricCalculator
 from util.checkpoint_manager import CheckpointManager
@@ -49,7 +52,10 @@ def setup_device(config):
     """设置计算设备"""
     if torch.cuda.is_available() and len(config.gpu_ids) > 0:
         device = torch.device(f'cuda:{config.gpu_ids[0]}')
-        print(f"Using GPU: {config.gpu_ids}")
+        if getattr(config, 'distributed', False):
+            print(f"Using DDP on local rank {config.local_rank}, visible GPU ids: {config.gpu_ids}")
+        else:
+            print(f"Using GPU: {config.gpu_ids}")
     else:
         device = torch.device('cpu')
         print("Using CPU")
@@ -83,6 +89,31 @@ def set_model_eval_mode(model):
         model.eval()
 
 
+def init_distributed(config):
+    """初始化 DDP 环境；仅在 torchrun/分布式启动时启用。"""
+    local_rank_env = os.environ.get('LOCAL_RANK')
+    world_size_env = os.environ.get('WORLD_SIZE')
+    rank_env = os.environ.get('RANK')
+
+    distributed = local_rank_env is not None and world_size_env is not None and int(world_size_env) > 1
+    config.distributed = distributed
+    config.local_rank = int(local_rank_env) if local_rank_env is not None else 0
+    config.rank = int(rank_env) if rank_env is not None else 0
+    config.world_size = int(world_size_env) if world_size_env is not None else 1
+    config.is_main_process = (config.rank == 0)
+
+    if distributed:
+        if not torch.cuda.is_available():
+            raise RuntimeError('DDP 需要 CUDA 环境')
+        torch.cuda.set_device(config.local_rank)
+        dist.init_process_group(backend='nccl', init_method='env://')
+        # DDP 下只保留当前进程绑定的单卡，避免 init_net 触发 DataParallel。
+        config.gpu_ids = [config.local_rank]
+        config.use_dataparallel = False
+
+    return distributed
+
+
 def train(config, device):
     """
     训练函数
@@ -95,13 +126,38 @@ def train(config, device):
     print("开始训练 (Training)")
     print("="*60)
     
+    is_main_process = getattr(config, 'is_main_process', True)
+    is_distributed = getattr(config, 'distributed', False)
+
     # 创建数据加载器
     print("\n正在加载数据...")
-    train_loader = create_dataloader(config, phase='train', shuffle=True)
-    val_loader = create_dataloader(config, phase='val', shuffle=False)
+    train_sampler = None
+    if is_distributed:
+        train_dataset = BlindPixelDataset(config, phase='train')
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=config.world_size,
+            rank=config.rank,
+            shuffle=True,
+            drop_last=True,
+        )
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=config.batch_size,
+            shuffle=False,
+            sampler=train_sampler,
+            num_workers=config.num_workers,
+            pin_memory=True,
+            drop_last=True,
+        )
+    else:
+        train_loader = create_dataloader(config, phase='train', shuffle=True)
+
+    val_loader = create_dataloader(config, phase='val', shuffle=False) if is_main_process else None
     
     print(f"  训练集大小: {len(train_loader.dataset)}")
-    print(f"  验证集大小: {len(val_loader.dataset)}")
+    if val_loader is not None:
+        print(f"  验证集大小: {len(val_loader.dataset)}")
     
     # 创建模型
     print("\n正在构建模型...")
@@ -121,15 +177,27 @@ def train(config, device):
         config.continue_train = False
     
     model = create_model(config)
+    if is_distributed and config.world_size > 1 and hasattr(model, 'net_G'):
+        model.net_G = DDP(
+            model.net_G,
+            device_ids=[config.local_rank],
+            output_device=config.local_rank,
+            find_unused_parameters=False,
+            broadcast_buffers=False,
+        )
     print(f"  模型: {config.model_name}")
     
-    # 创建检查点管理器
+    # 创建检查点管理器（所有进程都需要用于恢复；写入只在主进程进行）
     checkpoint_manager = CheckpointManager(config, config.best_metric)
     
-    # 创建日志记录器
-    train_logger = Logger(config, log_name='training')
-    val_logger = Logger(config, log_name='validation')
-    train_logger.log_config(config)
+    # 创建日志记录器（仅主进程写日志）
+    train_logger = Logger(config, log_name='training') if is_main_process else None
+    val_logger = Logger(config, log_name='validation') if is_main_process else None
+    if train_logger is not None:
+        train_logger.log_config(config)
+
+    if is_distributed:
+        dist.barrier()
     
     # 恢复训练（如果启用）
     start_epoch = 0
@@ -163,72 +231,96 @@ def train(config, device):
     scheduler = getattr(model, 'schedulers', [None])[0] if hasattr(model, 'schedulers') and len(getattr(model, 'schedulers', [])) > 0 else None
     
     for epoch in range(start_epoch, config.num_epochs):
+        if is_distributed and train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+
         # 训练阶段
         train_loss = train_epoch(model, train_loader, optimizer, device, config, epoch, train_logger)
+
+        if is_distributed:
+            loss_tensor = torch.tensor(train_loss, device=device)
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            train_loss = loss_tensor.item() / config.world_size
         
         # 获取当前学习率
         if hasattr(model, 'schedulers') and len(model.schedulers) > 0:
             model.update_learning_rate()
             current_lr = model.optimizers[0].param_groups[0]['lr']
-            train_logger.log(f"Epoch {epoch + 1}/{config.num_epochs} - LR: {current_lr:.6f}")
+            if train_logger is not None:
+                train_logger.log(f"Epoch {epoch + 1}/{config.num_epochs} - LR: {current_lr:.6f}")
 
         # 保存当前训练状态到单一检查点文件，便于随时续训
-        checkpoint_manager.save_checkpoint(
-            model,
-            optimizer,
-            scheduler,
-            epoch + 1,
-            {'loss': train_loss},
-            is_best=False
-        )
+        if is_main_process:
+            checkpoint_manager.save_checkpoint(
+                model,
+                optimizer,
+                scheduler,
+                epoch + 1,
+                {'loss': train_loss},
+                is_best=False
+            )
         
         # 验证阶段（每val_interval轮进行一次）
         if (epoch + 1) % config.val_interval == 0:
-            val_metrics = validate(model, val_loader, device, config, epoch, train_logger, val_logger, metric_calc)
+            if is_distributed:
+                dist.barrier()
+
+            val_metrics = validate(model, val_loader, device, config, epoch, train_logger, val_logger, metric_calc) if is_main_process else None
             
             # 检查是否是最好的模型
-            current_metric = val_metrics[config.best_metric]
-            
-            if best_metric is None:
-                best_metric = current_metric
-                is_best = True
-            elif config.best_metric == 'psnr':
-                # PSNR越高越好
-                is_best = current_metric > best_metric
-                if is_best:
-                    best_metric = current_metric
-            else:
-                # 其他指标（如loss）越低越好
-                is_best = current_metric < best_metric
-                if is_best:
-                    best_metric = current_metric
-            
-            # 保存检查点
-            if is_best or not config.save_best_only:
-                checkpoint_manager.save_checkpoint(
-                    model,
-                    optimizer,
-                    scheduler,
-                    epoch + 1,
-                    val_metrics,
-                    is_best=is_best
-                )
+            if is_main_process:
+                current_metric = val_metrics[config.best_metric]
                 
-                if is_best:
-                    train_logger.log(f"✓ 本次验证刷新最佳模型: {config.best_metric}={current_metric:.4f}，已更新 best_model.pt")
-                    val_logger.log(f"✓ 本次验证刷新最佳模型: {config.best_metric}={current_metric:.4f}，已更新 best_model.pt")
+                if best_metric is None:
+                    best_metric = current_metric
+                    is_best = True
+                elif config.best_metric == 'psnr':
+                    # PSNR越高越好
+                    is_best = current_metric > best_metric
+                    if is_best:
+                        best_metric = current_metric
                 else:
-                    train_logger.log(f"本次验证未刷新最佳模型: {config.best_metric}={current_metric:.4f}, 当前最佳={best_metric:.4f}")
-                    val_logger.log(f"本次验证未刷新最佳模型: {config.best_metric}={current_metric:.4f}, 当前最佳={best_metric:.4f}")
+                    # 其他指标（如loss）越低越好
+                    is_best = current_metric < best_metric
+                    if is_best:
+                        best_metric = current_metric
+                
+                # 保存检查点
+                if is_best or not config.save_best_only:
+                    checkpoint_manager.save_checkpoint(
+                        model,
+                        optimizer,
+                        scheduler,
+                        epoch + 1,
+                        val_metrics,
+                        is_best=is_best
+                    )
+                    
+                    if train_logger is not None and val_logger is not None:
+                        if is_best:
+                            train_logger.log(f"✓ 本次验证刷新最佳模型: {config.best_metric}={current_metric:.4f}，已更新 best_model.pt")
+                            val_logger.log(f"✓ 本次验证刷新最佳模型: {config.best_metric}={current_metric:.4f}，已更新 best_model.pt")
+                        else:
+                            train_logger.log(f"本次验证未刷新最佳模型: {config.best_metric}={current_metric:.4f}, 当前最佳={best_metric:.4f}")
+                            val_logger.log(f"本次验证未刷新最佳模型: {config.best_metric}={current_metric:.4f}, 当前最佳={best_metric:.4f}")
+
+            if is_distributed:
+                dist.barrier()
         
-        train_logger.log(f"Epoch {epoch + 1}/{config.num_epochs} - Train Loss: {train_loss:.4f}")
+        if train_logger is not None:
+            train_logger.log(f"Epoch {epoch + 1}/{config.num_epochs} - Train Loss: {train_loss:.4f}")
     
-    print("-" * 60)
-    print(f"✓ 训练完成，单一检查点文件: {os.path.join(config.checkpoint_dir, f'{config.model_prefix}.pt')}（包含最新训练状态与最佳模型权重）")
-    train_logger.log("Training completed!")
-    val_logger.log("Validation logging completed!")
-    train_logger.save_and_close()
-    val_logger.save_and_close()
+    if is_main_process:
+        print("-" * 60)
+        print(f"✓ 训练完成，单一检查点文件: {os.path.join(config.checkpoint_dir, f'{config.model_prefix}.pt')}（包含最新训练状态与最佳模型权重）")
+        if train_logger is not None and val_logger is not None:
+            train_logger.log("Training completed!")
+            val_logger.log("Validation logging completed!")
+            train_logger.save_and_close()
+            val_logger.save_and_close()
+
+    if is_distributed:
+        dist.barrier()
 
 
 def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
@@ -273,7 +365,7 @@ def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
         num_batches += 1
         
         # 定期输出日志
-        if (batch_idx + 1) % config.print_freq == 0:
+        if logger is not None and (batch_idx + 1) % config.print_freq == 0:
             logger.log(f"  Epoch {epoch + 1} [{batch_idx + 1}/{len(dataloader)}] - Loss: {total_loss / num_batches:.4f}")
     
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
@@ -347,19 +439,18 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
     avg_psnr = np.mean(psnr_list) if psnr_list else 0.0
     avg_ssim = np.mean(ssim_list) if ssim_list else 0.0
     
-    print(f"当前验证指标 - PSNR: {avg_psnr:.4f}, SSIM: {avg_ssim:.4f}, LOSS: {metrics['loss']:.4f}")
-    val_logger.log_validation(epoch, metrics={
-        'psnr': avg_psnr,
-        'ssim': avg_ssim,
-        'loss': np.mean(loss_list) if loss_list else 0.0
-    })
-    train_logger.log(f"验证结果 - PSNR: {avg_psnr:.4f}, SSIM: {avg_ssim:.4f}")
-    
+    avg_loss = np.mean(loss_list) if loss_list else 0.0
     metrics = {
         'psnr': avg_psnr,
         'ssim': avg_ssim,
-        'loss': np.mean(loss_list) if loss_list else 0.0
+        'loss': avg_loss
     }
+
+    print(f"当前验证指标 - PSNR: {avg_psnr:.4f}, SSIM: {avg_ssim:.4f}, LOSS: {avg_loss:.4f}")
+    if val_logger is not None:
+        val_logger.log_validation(epoch, metrics=metrics)
+    if train_logger is not None:
+        train_logger.log(f"验证结果 - PSNR: {avg_psnr:.4f}, SSIM: {avg_ssim:.4f}")
     
     set_model_train_mode(model)
     return metrics
@@ -567,6 +658,9 @@ def main():
     
     # 设置随机种子
     setup_seed(config)
+
+    # 初始化分布式环境（如果通过 torchrun 启动）
+    init_distributed(config)
     
     # 设置设备
     device = setup_device(config)
@@ -577,10 +671,15 @@ def main():
     # 确保检查点目录中只保留单一 best_model.pt，历史遗留文件已经在 CheckpointManager 中清理
     
     # 运行训练或测试
-    if args.train:
-        train(config, device)
-    else:
-        test(config, device)
+    try:
+        if args.train:
+            train(config, device)
+        else:
+            test(config, device)
+    finally:
+        if getattr(config, 'distributed', False) and dist.is_available() and dist.is_initialized():
+            dist.barrier()
+            dist.destroy_process_group()
 
 
 if __name__ == '__main__':
