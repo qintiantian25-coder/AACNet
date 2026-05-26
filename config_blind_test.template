@@ -1,0 +1,189 @@
+# AACNet 盲元测试 - 配置模板
+# 复制此文件并修改参数后，使用以下命令运行：
+# python test_blind_aacnet.py $(cat this_config.txt)
+
+# ========================================
+# 必需参数
+# ========================================
+
+# 数据集根目录（必需）
+# 应包含: test_blur/, test_sharp/, test_mask/ 等子目录
+--data_root /home/student_server/Qtt/NAFNet/data
+
+# 模型检查点文件（必需）
+# 支持 .pth 格式，自动处理 DataParallel 前缀
+--checkpoint ./checkpoints/aacnet_blind/net_G_latest.pth
+
+# ========================================
+# 可选参数 - 输出设置
+# ========================================
+
+# 结果保存目录（默认自动生成带时间戳的目录）
+# --save_dir ./results/aacnet_blind_test_v1
+
+# 输出结果包含：
+#   - test/<group>/：补完后的图像
+#   - blind_eval/<group>/test_blind_metrics.csv：组级指标
+#   - blind_eval/test_blind_metrics.csv：全局指标
+
+# ========================================
+# 可选参数 - 计算设备
+# ========================================
+
+# 计算设备选择（cuda 或 cpu，默认 cuda）
+--device cuda
+
+# GPU IDs（多块GPU用逗号分隔，默认 0）
+# 单GPU: --gpu_ids 0
+# 多GPU: --gpu_ids 0,1,2,3
+--gpu_ids 0
+
+# ========================================
+# 可选参数 - 评估设置
+# ========================================
+
+# PSNR/SSIM 计算时的边界裁剪像素数（默认 0）
+# 某些数据集在边界处有伪影，可设置为 4 或 8 来忽略边界
+--image_border 0
+
+# ========================================
+# 可选参数 - 盲元掩码配置
+# ========================================
+
+# 盲元掩码路径或目录（可选）
+# 支持3种格式：
+#   1. 目录路径：test_mask/ （脚本自动扫描该目录）
+#   2. CSV文件路径：test_mask/blind_coords.csv
+#   3. 目录路径：可按组名子目录组织
+# 如果不指定，脚本将尝试从 <data_root>/test_mask 加载
+# --test_mask_csv /path/to/mask_csv_or_dir
+
+# ========================================
+# 可选参数 - 模型配置
+# ========================================
+
+# 模型名称（默认 aacnet）
+# 对应 model/<model_name>_model.py 文件
+--model aacnet
+
+# 模型实例名称（默认 aacnet_blind）
+--name aacnet_blind
+
+# 检查点目录（默认 ./checkpoints）
+# 用于存储模型检查点的基础目录
+--checkpoints_dir ./checkpoints
+
+# ========================================
+# 高级选项
+# ========================================
+
+# 可根据需要添加其他选项：
+# --ntest <number>：测试图像数量限制
+# --how_many <number>：每组图像的处理数量
+# --phase <phase>：test/val/train，默认 test
+
+# ========================================
+# 使用示例
+# ========================================
+
+# 方式1：直接使用此文件的所有参数
+# 将此文件保存为 config.txt，然后运行：
+# python test_blind_aacnet.py $(cat config.txt)
+
+# 方式2：覆盖部分参数
+# python test_blind_aacnet.py $(cat config.txt) --save_dir ./results/v2
+
+# 方式3：完整命令行
+# python test_blind_aacnet.py \
+#     --data_root /home/student_server/Qtt/NAFNet/data \
+#     --checkpoint ./checkpoints/aacnet_blind/net_G_latest.pth \
+#     --save_dir ./results/test_v1 \
+#     --device cuda \
+#     --gpu_ids 0
+
+# ========================================
+# 数据集结构要求
+# ========================================
+
+# 期望的目录结构：
+# <data_root>/
+# ├── test_blur/          # 含盲元的破损图像 (RGB)
+# ├── test_sharp/         # 参考清晰图像 (RGB)
+# ├── test_mask/          # 盲元位置信息
+# │   ├── group_001/      # 组名，可选
+# │   │   ├── blind_coords.csv         # 静态盲元坐标
+# │   │   └── flash_pixel_coords.csv   # 动态盲元坐标（可选）
+# │   └── group_002/
+# ├── val_blur/
+# ├── val_sharp/
+# ├── val_mask/
+# ├── train_blur/
+# ├── train_sharp/
+# └── train_mask/
+
+# ========================================
+# CSV 文件格式
+# ========================================
+
+# blind_coords.csv (静态盲元坐标)
+# x,y
+# 100,50
+# 101,50
+# 102,50
+
+# flash_pixel_coords.csv (动态盲元坐标)
+# frame_name,x,y
+# image_001.png,100,50
+# image_001.png,101,50
+# image_002.png,102,51
+
+# ========================================
+# 输出说明
+# ========================================
+
+# 结果目录结构：
+# results/aacnet_blind_test_YYYYMMDD_HHMMSS/
+# ├── test/
+# │   ├── group_001/
+# │   │   ├── image_001.png
+# │   │   └── ...
+# │   └── group_002/
+# └── blind_eval/
+#     ├── group_001/
+#     │   └── test_blind_metrics.csv
+#     ├── group_002/
+#     │   └── test_blind_metrics.csv
+#     └── test_blind_metrics.csv  # 全局聚合指标
+
+# ========================================
+# 评估指标说明
+# ========================================
+
+# PSNR: 峰值信号噪声比 (dB)
+#       - 定义：10 * log10(255^2 / MSE)
+#       - 范围：0~100（通常 20-50）
+#       - 越高越好
+#
+# SSIM: 结构相似性指数
+#       - 范围：-1~1
+#       - 越接近 1 越好
+#       - 通常 0.5~1.0
+#
+# blind_mae: 盲元区域平均绝对误差
+#           - 范围：0~255
+#           - 越小越好
+#
+# blind_rmse: 盲元区域均方根误差
+#            - 范围：0~255
+#            - 越小越好
+#
+# blind_psnr: 基于盲元像素的PSNR (dB)
+#            - 范围：0~100
+#            - 越高越好
+#
+# blind_mae_gain: MAE相对于输入的改进百分比
+#                - 范围：-100~100 (%)
+#                - 越高越好（正值表示改进）
+#
+# blind_count: 评估的盲元像素总数
+#             - 用于验证盲元坐标加载是否正确
