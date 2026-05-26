@@ -315,10 +315,10 @@ def train(config, device):
                     if train_logger is not None and val_logger is not None:
                         if is_best:
                             train_logger.log(f"✓ 本次验证刷新最佳模型: {config.best_metric}={current_metric:.4f}，已更新 best_model.pt")
-                            val_logger.log(f"✓ 本次验证刷新最佳模型: {config.best_metric}={current_metric:.4f}，已更新 best_model.pt")
+                            val_logger.log(f"✓ 本次验证刷新最佳模型: {config.best_metric}={current_metric:.4f}，已更新 best_model.pt", echo=False)
                         else:
                             train_logger.log(f"本次验证未刷新最佳模型: {config.best_metric}={current_metric:.4f}, 当前最佳={best_metric:.4f}")
-                            val_logger.log(f"本次验证未刷新最佳模型: {config.best_metric}={current_metric:.4f}, 当前最佳={best_metric:.4f}")
+                            val_logger.log(f"本次验证未刷新最佳模型: {config.best_metric}={current_metric:.4f}, 当前最佳={best_metric:.4f}", echo=False)
 
             if is_distributed:
                 dist.barrier()

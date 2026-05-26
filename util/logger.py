@@ -40,7 +40,7 @@ class Logger:
         self.log("="*60)
         self.log("")
     
-    def log(self, message):
+    def log(self, message, echo=True):
         """
         记录日志信息
         
@@ -50,8 +50,9 @@ class Logger:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_message = f"[{timestamp}] {message}"
         
-        # 同时输出到控制台和文件
-        print(message)
+        # 默认同时输出到控制台和文件；某些重复信息可以只写文件不回显
+        if echo:
+            print(message)
         
         if self.log_file:
             self.log_file.write(log_message + '\n')

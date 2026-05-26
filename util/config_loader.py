@@ -110,8 +110,10 @@ class ConfigLoader:
         config.results_dir = self.get('testing', 'results_dir', './results')
         
         # 检查点配置
-        config.checkpoint_dir = self.get('checkpoint', 'checkpoint_dir', './checkpoints')
-        config.model_prefix = self.get('checkpoint', 'model_prefix', 'best_model')
+        checkpoint_dir = self.get('checkpoint', 'checkpoint_dir', '')
+        checkpoints_dir = self.get('checkpoint', 'checkpoints_dir', '')
+        config.checkpoint_dir = checkpoint_dir or checkpoints_dir or './checkpoints'
+        config.model_prefix = self.get('checkpoint', 'model_prefix', self.get('checkpoint', 'name', 'best_model'))
         config.save_interval = self.getint('checkpoint', 'save_interval', 0)
         config.save_best_only = self.getbool('checkpoint', 'save_best_only', True)
         config.best_metric = self.get('checkpoint', 'best_metric', 'psnr')
