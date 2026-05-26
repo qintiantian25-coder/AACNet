@@ -24,12 +24,11 @@ class Logger:
         
         os.makedirs(self.log_dir, exist_ok=True)
         
-        # 创建日志文件
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_filename = f'{self.log_name}_{timestamp}.log'
+        # 创建固定名称的日志文件（训练与验证各一个），覆盖旧文件
+        log_filename = f'{self.log_name}.txt'
         self.log_path = os.path.join(self.log_dir, log_filename)
-        
-        # 打开日志文件
+
+        # 以写模式打开，确保每次运行生成的仅有最新的两个日志文件
         self.log_file = open(self.log_path, 'w', encoding='utf-8')
         
         # 记录初始信息
