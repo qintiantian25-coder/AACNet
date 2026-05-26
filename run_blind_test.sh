@@ -62,7 +62,7 @@ echo ""
 
 cd "$(dirname "$0")"
 
-python test_blind_aacnet.py \
+python test.py \
     --data_root "$DATA_ROOT" \
     --checkpoint "$CHECKPOINT" \
     --save_dir "$SAVE_DIR" \
