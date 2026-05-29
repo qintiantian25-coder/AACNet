@@ -423,9 +423,8 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
             output_uint8 = (output_np * 255).astype(np.uint8)
             target_uint8 = (target_np * 255).astype(np.uint8)
             
-            # 计算PSNR和SSIM
-            psnr = metric_calc.calculate_psnr(output_uint8, target_uint8)
-            ssim = metric_calc.calculate_ssim(output_uint8, target_uint8)
+            # 使用与测试阶段一致的同一套指标计算实现
+            psnr, ssim = metric_calc.calculate_psnr_ssim(output_uint8, target_uint8)
             
             # 异常值防护
             if np.isfinite(psnr):

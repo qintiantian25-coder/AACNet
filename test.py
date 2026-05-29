@@ -327,8 +327,7 @@ def run_test(config, device=None):
             output_uint8 = (np.clip(output_np, 0, 1) * 255).astype(np.uint8)
             target_uint8 = (np.clip(target_np, 0, 1) * 255).astype(np.uint8)
 
-            psnr = metric_calc.calculate_psnr(output_uint8, target_uint8)
-            ssim = metric_calc.calculate_ssim(output_uint8, target_uint8)
+            psnr, ssim = metric_calc.calculate_psnr_ssim(output_uint8, target_uint8)
             if np.isfinite(psnr):
                 psnr_list.append(psnr)
             if np.isfinite(ssim):

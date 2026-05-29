@@ -95,6 +95,10 @@ class MetricCalculator:
             (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
         
         return np.mean(ssim_map)
+
+    def calculate_psnr_ssim(self, img1, img2):
+        """一次性计算 PSNR 和 SSIM，保证训练验证与测试走同一套实现。"""
+        return self.calculate_psnr(img1, img2), self.calculate_ssim(img1, img2)
     
     def calculate_mae(self, img1, img2):
         """
