@@ -351,9 +351,10 @@ def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
         model.set_input(input_data)
         model.optimize_parameters()
         
-        # 计算损失
+        # 计算损失（兼容 tensor/float，统一转为 python float 后再累计）
         loss_dict = model.get_current_errors()
-        total_loss += sum(loss_dict.values())
+        batch_loss = sum(v.item() if torch.is_tensor(v) else float(v) for v in loss_dict.values())
+        total_loss += batch_loss
         num_batches += 1
         
         # 定期输出日志
@@ -364,6 +365,7 @@ def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
     return avg_loss
 
 
+@torch.no_grad()
 def validate(model, dataloader, device, config, epoch, train_logger, val_logger, metric_calc):
     """
     验证函数
@@ -388,53 +390,52 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
     ssim_list = []
     loss_list = []
     
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
-            # 创建输入字典
-            input_data = {
-                'img': batch['blur'].to(device),
-                'mask': batch['mask'].to(device),
-                'img_path': batch['img_path']
-            }
-            
-            # 扩展mask到3通道
-            if input_data['mask'].shape[1] == 1:
-                input_data['mask'] = input_data['mask'].repeat(1, 3, 1, 1)
-            
-            # 前向传播
-            model.set_input(input_data)
-            model.test()
-            
-            # === 新增：获取当前验证 batch 的验证损失，填补原本空白的 loss_list ===
-            loss_dict = model.get_current_errors()
-            if loss_dict:
-                loss_list.append(sum(loss_dict.values()))
-            # ================================================================
-            
-            # 获取输出
-            output = model.img_out  # [-1, 1]
-            target = model.img_truth  # [-1, 1]
-            
-            # 转换为[0, 1]用于计算指标
-            output_np = ((output[0].cpu().numpy() + 1) / 2).transpose(1, 2, 0)
-            target_np = ((target[0].cpu().numpy() + 1) / 2).transpose(1, 2, 0)
-            
-            # 转换为uint8
-            output_uint8 = (output_np * 255).astype(np.uint8)
-            target_uint8 = (target_np * 255).astype(np.uint8)
-            
-            # 使用与测试阶段一致的同一套指标计算实现
-            psnr, ssim = metric_calc.calculate_psnr_ssim(output_uint8, target_uint8)
-            
-            # 异常值防护
-            if np.isfinite(psnr):
-                psnr_list.append(psnr)
-            if np.isfinite(ssim):
-                ssim_list.append(ssim)
-            
-            # 保存验证可视化结果
-            if config.save_val_visual and batch_idx < 5:  # 只保存前5张
-                save_visual_result(output_uint8, target_uint8, batch['name'][0], config.val_visual_dir, epoch)
+    for batch_idx, batch in enumerate(dataloader):
+        # 创建输入字典
+        input_data = {
+            'img': batch['blur'].to(device),
+            'mask': batch['mask'].to(device),
+            'img_path': batch['img_path']
+        }
+        
+        # 扩展mask到3通道
+        if input_data['mask'].shape[1] == 1:
+            input_data['mask'] = input_data['mask'].repeat(1, 3, 1, 1)
+        
+        # 前向传播
+        model.set_input(input_data)
+        model.test()
+        
+        # === 新增：获取当前验证 batch 的验证损失，填补原本空白的 loss_list ===
+        loss_dict = model.get_current_errors()
+        if loss_dict:
+            loss_list.append(sum(v.item() if torch.is_tensor(v) else float(v) for v in loss_dict.values()))
+        # ================================================================
+        
+        # 获取输出
+        output = model.img_out  # [-1, 1]
+        target = model.img_truth  # [-1, 1]
+        
+        # 转换为[0, 1]用于计算指标
+        output_np = ((output[0].cpu().numpy() + 1) / 2).transpose(1, 2, 0)
+        target_np = ((target[0].cpu().numpy() + 1) / 2).transpose(1, 2, 0)
+        
+        # 转换为uint8
+        output_uint8 = (output_np * 255).astype(np.uint8)
+        target_uint8 = (target_np * 255).astype(np.uint8)
+        
+        # 使用与测试阶段一致的同一套指标计算实现
+        psnr, ssim = metric_calc.calculate_psnr_ssim(output_uint8, target_uint8)
+        
+        # 异常值防护
+        if np.isfinite(psnr):
+            psnr_list.append(psnr)
+        if np.isfinite(ssim):
+            ssim_list.append(ssim)
+        
+        # 保存验证可视化结果
+        if config.save_val_visual and batch_idx < 5:  # 只保存前5张
+            save_visual_result(output_uint8, target_uint8, batch['name'][0], config.val_visual_dir, epoch)
     
     # 计算平均指标
     avg_psnr = np.mean(psnr_list) if psnr_list else 0.0
