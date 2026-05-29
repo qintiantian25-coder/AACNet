@@ -39,8 +39,6 @@ def setup_seed(config):
         torch.manual_seed(config.seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed(config.seed)
-            if torch.distributed.is_available() and torch.distributed.is_initialized():
-                torch.cuda.manual_seed_all(config.seed)
     
     if config.cudnn_benchmark:
         torch.backends.cudnn.benchmark = True
@@ -54,16 +52,9 @@ def setup_seed(config):
 def setup_device(config):
     """设置计算设备"""
     if torch.cuda.is_available() and len(config.gpu_ids) > 0:
-        if getattr(config, 'distributed', False):
-            torch.cuda.set_device(config.local_rank)
-            device = torch.device(f'cuda:{config.local_rank}')
-        else:
-            torch.cuda.set_device(config.gpu_ids[0])
-            device = torch.device(f'cuda:{config.gpu_ids[0]}')
-        if getattr(config, 'distributed', False):
-            print(f"Using DDP on local rank {config.local_rank}, current cuda device: {torch.cuda.current_device()}, visible GPU ids: {config.gpu_ids}")
-        else:
-            print(f"Using GPU: {config.gpu_ids}")
+        torch.cuda.set_device(config.gpu_ids[0])
+        device = torch.device(f'cuda:{config.gpu_ids[0]}')
+        print(f"Using single GPU: {config.gpu_ids[0]}")
     else:
         device = torch.device('cpu')
         print("Using CPU")
@@ -98,29 +89,13 @@ def set_model_eval_mode(model):
 
 
 def init_distributed(config):
-    """初始化 DDP 环境；仅在 torchrun/分布式启动时启用。"""
-    local_rank_env = os.environ.get('LOCAL_RANK')
-    world_size_env = os.environ.get('WORLD_SIZE')
-    rank_env = os.environ.get('RANK')
-
-    distributed = local_rank_env is not None and world_size_env is not None and int(world_size_env) > 1
-    config.distributed = distributed
-    config.local_rank = int(local_rank_env) if local_rank_env is not None else 0
-    config.rank = int(rank_env) if rank_env is not None else 0
-    config.world_size = int(world_size_env) if world_size_env is not None else 1
-    config.is_main_process = (config.rank == 0)
-
-    if distributed:
-        if not torch.cuda.is_available():
-            raise RuntimeError('DDP 需要 CUDA 环境')
-        torch.cuda.set_device(config.local_rank)
-        dist.init_process_group(backend='nccl', init_method='env://')
-        torch.cuda.empty_cache()
-        # DDP 下只保留当前进程绑定的单卡，避免 init_net 触发 DataParallel。
-        config.gpu_ids = [config.local_rank]
-        config.use_dataparallel = False
-
-    return distributed
+    """单卡模式下不初始化分布式环境。"""
+    config.distributed = False
+    config.local_rank = 0
+    config.rank = 0
+    config.world_size = 1
+    config.is_main_process = True
+    return False
 
 
 def train(config, device):
@@ -179,7 +154,7 @@ def train(config, device):
     if not hasattr(config, 'checkpoints_dir'):
         config.checkpoints_dir = config.checkpoint_dir
     if not hasattr(config, 'name'):
-        config.name = config.model_prefix
+        config.name = getattr(config, 'experiment_name', 'aacnet_blind')
     if not hasattr(config, 'which_iter'):
         config.which_iter = 0
     if not hasattr(config, 'continue_train'):
@@ -328,7 +303,8 @@ def train(config, device):
     
     if is_main_process:
         print("-" * 60)
-        print(f"✓ 训练完成，单一检查点文件: {os.path.join(config.checkpoint_dir, f'{config.model_prefix}.pt')}（包含最新训练状态与最佳模型权重）")
+        print(f"✓ 训练完成，最佳模型: {os.path.join(config.checkpoint_dir, 'best_model.pt')}")
+        print(f"✓ 最新训练状态: {os.path.join(config.checkpoint_dir, 'last_state.pt')}")
         if train_logger is not None and val_logger is not None:
             train_logger.log("Training completed!")
             val_logger.log("Validation logging completed!")
@@ -485,145 +461,9 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
 
 
 def test(config, device):
-    """
-    测试函数
-    
-    Args:
-        config: 配置对象
-        device: 计算设备
-    """
-    print("\n" + "="*60)
-    print("开始测试 (Testing)")
-    print("="*60)
-    
-    # 创建数据加载器
-    print("\n正在加载测试数据...")
-    test_loader = create_dataloader(config, phase='test', shuffle=False)
-    print(f"  测试集大小: {len(test_loader.dataset)}")
-    
-    # 创建模型
-    print("\n正在加载模型...")
-    # create_model期望opt.model属性，所以设置它
-    config.model = config.model_name
-    # 添加模型期望的其他属性
-    config.lr = config.learning_rate
-    config.isTrain = False
-    # 添加checkpoint相关的参数
-    if not hasattr(config, 'checkpoints_dir'):
-        config.checkpoints_dir = config.checkpoint_dir
-    if not hasattr(config, 'name'):
-        config.name = config.model_prefix
-    if not hasattr(config, 'which_iter'):
-        config.which_iter = 0
-    if not hasattr(config, 'continue_train'):
-        config.continue_train = False
-    
-    model = create_model(config)
-    
-    # 单卡模式下测试：将底层子网络分配到单卡对应设备上
-    if hasattr(model, 'net_G'):
-        model.net_G = model.net_G.to(device)
-        
-    set_model_eval_mode(model)
-    
-    # 加载最佳检查点
-    checkpoint_manager = CheckpointManager(config, config.best_metric)
-    best_ckpt = checkpoint_manager.find_best_checkpoint()
-    
-    if best_ckpt:
-        print(f"加载 best_model.pt 中的最佳模型权重: {best_ckpt}")
-        checkpoint_manager.load_checkpoint(best_ckpt, model, load_weights_only=True, use_best=True)
-    else:
-        print("警告: 未找到 best_model.pt，使用随机初始化的模型")
-    
-    # 创建指标计算器
-    metric_calc = MetricCalculator(config.crop_border)
-    
-    # 创建结果保存目录
-    os.makedirs(config.results_dir, exist_ok=True)
-    
-    # 测试循环
-    print(f"\n开始测试...")
-    print("-" * 60)
-    
-    results = []
-    psnr_list = []
-    ssim_list = []
-    
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(test_loader):
-            # 创建输入字典
-            input_data = {
-                'img': batch['blur'].to(device),
-                'mask': batch['mask'].to(device),
-                'img_path': batch['img_path']
-            }
-            
-            # 扩展mask到3通道
-            if input_data['mask'].shape[1] == 1:
-                input_data['mask'] = input_data['mask'].repeat(1, 3, 1, 1)
-            
-            # 前向传播
-            model.set_input(input_data)
-            model.test()
-            
-            # 获取输出
-            output = model.img_out  # [-1, 1]
-            target = model.img_truth  # [-1, 1]
-            
-            # 转换为[0, 1]用于计算指标
-            output_np = ((output[0].cpu().numpy() + 1) / 2).transpose(1, 2, 0)
-            target_np = ((target[0].cpu().numpy() + 1) / 2).transpose(1, 2, 0)
-            
-            # 转换为uint8
-            output_uint8 = (output_np * 255).astype(np.uint8)
-            target_uint8 = (target_np * 255).astype(np.uint8)
-            
-            # 计算指标
-            psnr = metric_calc.calculate_psnr(output_uint8, target_uint8)
-            ssim = metric_calc.calculate_ssim(output_uint8, target_uint8)
-            
-            if np.isfinite(psnr):
-                psnr_list.append(psnr)
-            if np.isfinite(ssim):
-                ssim_list.append(ssim)
-            
-            # 保存结果
-            if config.save_results:
-                # 转换回BGR格式保存
-                output_bgr = (output_np[:, :, ::-1] * 255).astype(np.uint8)
-                result_path = os.path.join(config.results_dir, batch['name'][0])
-                os.makedirs(os.path.dirname(result_path), exist_ok=True)
-                cv2.imwrite(result_path, output_bgr)
-            
-            # 记录结果
-            results.append({
-                'image': batch['name'][0],
-                'group': batch['group'][0],
-                'psnr': psnr,
-                'ssim': ssim
-            })
-            
-            if (batch_idx + 1) % 10 == 0:
-                print(f"  处理 [{batch_idx + 1}/{len(test_loader)}] - PSNR: {psnr:.4f}, SSIM: {ssim:.4f}")
-    
-    # 保存测试结果到CSV
-    csv_path = os.path.join(config.results_dir, 'test_results.csv')
-    with open(csv_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['image', 'group', 'psnr', 'ssim'])
-        writer.writeheader()
-        writer.writerows(results)
-    
-    # 计算平均指标
-    avg_psnr = np.mean(psnr_list) if psnr_list else 0.0
-    avg_ssim = np.mean(ssim_list) if ssim_list else 0.0
-    
-    print("-" * 60)
-    print(f"\n测试完成!")
-    print(f"  平均 PSNR: {avg_psnr:.4f}")
-    print(f"  平均 SSIM: {avg_ssim:.4f}")
-    print(f"  结果保存到: {config.results_dir}")
-    print(f"  指标保存到: {csv_path}")
+    """单卡测试入口，直接复用 test.py 中的定量评估实现。"""
+    from test import run_test
+    return run_test(config, device=device)
 
 
 def save_visual_result(output, target, name, save_dir, epoch):

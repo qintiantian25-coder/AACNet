@@ -42,10 +42,8 @@ class AACNetBlind(BaseModel):
             )
             self.optimizers.append(self.optimizer_G)
 
-        if not self.isTrain:
-            self.setup(opt)
-        else:
-            # 如果是训练模式，也加载预训练模型
+        if self.isTrain:
+            # 训练模式只初始化优化器与调度器，不自动尝试加载不存在的测试权重
             self.setup(opt)
 
     def set_input(self, input_data, epoch=0):

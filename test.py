@@ -8,6 +8,9 @@ import torch
 from collections import defaultdict
 from options import test_options
 from model import create_model
+from dataloader.blind_pixel_loader import create_dataloader
+from util.checkpoint_manager import CheckpointManager
+from util.metrics import MetricCalculator
 import sys
 from datetime import datetime
 
@@ -221,6 +224,212 @@ class TestReport:
             return
         print(f'Average PSNR: {np.mean(self.total_psnr):.4f} dB')
         print(f'Average SSIM: {np.mean(self.total_ssim):.4f}')
+
+
+def run_test(config, device=None):
+    """单卡定量测试入口，供 main.py --test 复用。"""
+    if device is None:
+        if torch.cuda.is_available() and isinstance(getattr(config, 'gpu_ids', []), (list, tuple)) and len(config.gpu_ids) > 0:
+            device = torch.device(f'cuda:{config.gpu_ids[0]}')
+        else:
+            device = torch.device('cpu')
+
+    print("\n" + "=" * 60)
+    print("开始测试 (Testing)")
+    print("=" * 60)
+    print("\n正在加载测试数据...")
+
+    test_loader = create_dataloader(config, phase='test', shuffle=False)
+    print(f"  测试集大小: {len(test_loader.dataset)}")
+
+    print("\n正在加载模型...")
+    config.model = config.model_name
+    config.lr = config.learning_rate
+    config.isTrain = False
+    if not hasattr(config, 'checkpoints_dir'):
+        config.checkpoints_dir = config.checkpoint_dir
+    if not hasattr(config, 'name'):
+        config.name = getattr(config, 'experiment_name', 'aacnet_blind')
+    if not hasattr(config, 'which_iter'):
+        config.which_iter = 0
+    if not hasattr(config, 'continue_train'):
+        config.continue_train = False
+
+    model = create_model(config)
+    if hasattr(model, 'net_G'):
+        model.net_G = model.net_G.to(device)
+    model.eval()
+
+    checkpoint_manager = CheckpointManager(config, config.best_metric)
+    best_ckpt = checkpoint_manager.find_best_checkpoint()
+    if best_ckpt:
+        print(f"加载 best_model.pt 中的最佳模型权重: {best_ckpt}")
+        checkpoint_manager.load_checkpoint(best_ckpt, model, load_weights_only=True, use_best=True)
+    else:
+        print("警告: 未找到 best_model.pt，使用随机初始化的模型")
+
+    metric_calc = MetricCalculator(config.crop_border)
+    os.makedirs(config.results_dir, exist_ok=True)
+    save_pure = os.path.join(config.results_dir, 'test')
+    save_blind_dir = os.path.join(config.results_dir, 'blind_eval')
+    os.makedirs(save_pure, exist_ok=True)
+    os.makedirs(save_blind_dir, exist_ok=True)
+
+    mask_root = os.path.join(config.data_root, config.test_mask_dir)
+    group_cache = {}
+    per_image_logs = []
+    psnr_list = []
+    ssim_list = []
+    blind_abs_sum = 0.0
+    blind_sq_sum = 0.0
+    blind_pix_sum = 0
+
+    print(f"\n开始测试...")
+    print("-" * 60)
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(test_loader):
+            group_name = batch['group'][0]
+            image_name = batch['name'][0]
+
+            if group_name not in group_cache:
+                masks = resolve_group_mask_paths(mask_root, config.data_root, group_name)
+                blind_coords = load_blind_coords(masks['blind_csv']) if masks['blind_csv'] else None
+                flash_map = load_flash_map(masks['flash_csv']) if masks['flash_csv'] else {}
+                group_cache[group_name] = {
+                    'blind_coords': blind_coords,
+                    'flash_map': flash_map,
+                }
+                if masks['blind_csv'] and blind_coords is not None:
+                    print(f"Loaded blind coords for group {group_name} from: {masks['blind_csv']} ({len(blind_coords)} unique points)")
+                elif masks['blind_csv']:
+                    print(f"WARN: blind coords CSV not loaded for group {group_name}: {masks['blind_csv']}")
+                else:
+                    print(f"WARN: no blind coords CSV found for group {group_name}")
+
+            group_info = group_cache[group_name]
+
+            input_data = {
+                'img': batch['blur'].to(device),
+                'mask': batch['mask'].to(device),
+                'img_path': batch['img_path'],
+            }
+            if input_data['mask'].shape[1] == 1:
+                input_data['mask'] = input_data['mask'].repeat(1, 3, 1, 1)
+
+            model.set_input(input_data)
+            model.test()
+
+            output = model.img_out
+            target = model.img_truth
+            output_np = ((output[0].detach().cpu().numpy() + 1) / 2).transpose(1, 2, 0)
+            target_np = ((target[0].detach().cpu().numpy() + 1) / 2).transpose(1, 2, 0)
+            output_uint8 = (np.clip(output_np, 0, 1) * 255).astype(np.uint8)
+            target_uint8 = (np.clip(target_np, 0, 1) * 255).astype(np.uint8)
+
+            psnr = metric_calc.calculate_psnr(output_uint8, target_uint8)
+            ssim = metric_calc.calculate_ssim(output_uint8, target_uint8)
+            if np.isfinite(psnr):
+                psnr_list.append(psnr)
+            if np.isfinite(ssim):
+                ssim_list.append(ssim)
+
+            output_gray = cv2.cvtColor(output_uint8, cv2.COLOR_RGB2GRAY)
+            target_gray = cv2.cvtColor(target_uint8, cv2.COLOR_RGB2GRAY)
+            row = {
+                'image': image_name,
+                'group': group_name,
+                'psnr': float(psnr),
+                'ssim': float(ssim),
+                'blind_mae': None,
+                'blind_rmse': None,
+                'blind_psnr': None,
+                'blind_count': 0,
+            }
+
+            merged_coords = []
+            blind_coords = group_info['blind_coords']
+            if blind_coords is not None and len(blind_coords) > 0:
+                xs = blind_coords[:, 0]
+                ys = blind_coords[:, 1]
+                h, w = target_gray.shape[:2]
+                valid = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+                if np.any(valid):
+                    merged_coords.extend(zip(xs[valid].tolist(), ys[valid].tolist()))
+
+            flash_coords = group_info['flash_map'].get(image_name, [])
+            merged_coords.extend(flash_coords)
+
+            if len(merged_coords) > 0:
+                coords_arr = np.unique(np.array(merged_coords, dtype=np.int32), axis=0)
+                xs = coords_arr[:, 0]
+                ys = coords_arr[:, 1]
+                h, w = target_gray.shape[:2]
+                valid = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+                if np.any(valid):
+                    xs = xs[valid]
+                    ys = ys[valid]
+                    gt_vals = target_gray[ys, xs].astype(np.float64)
+                    out_vals = output_gray[ys, xs].astype(np.float64)
+                    err = out_vals - gt_vals
+                    abs_err = np.abs(err)
+                    sq_err = err ** 2
+                    blind_abs_sum += float(abs_err.sum())
+                    blind_sq_sum += float(sq_err.sum())
+                    blind_pix_sum += int(len(err))
+                    row.update({
+                        'blind_mae': float(abs_err.mean()),
+                        'blind_rmse': float(np.sqrt(sq_err.mean())),
+                        'blind_psnr': float(10.0 * np.log10((255.0 * 255.0) / max(float(sq_err.mean()), 1e-12))),
+                        'blind_count': int(len(err)),
+                    })
+
+            per_image_logs.append(row)
+
+            if config.save_results:
+                group_dir = os.path.join(save_pure, group_name)
+                os.makedirs(group_dir, exist_ok=True)
+                cv2.imwrite(os.path.join(group_dir, image_name), cv2.cvtColor(output_uint8, cv2.COLOR_RGB2BGR))
+
+            if (batch_idx + 1) % 10 == 0:
+                print(f"  处理 [{batch_idx + 1}/{len(test_loader)}] - PSNR: {psnr:.4f}, SSIM: {ssim:.4f}")
+
+    avg_psnr = np.mean(psnr_list) if psnr_list else 0.0
+    avg_ssim = np.mean(ssim_list) if ssim_list else 0.0
+    print("-" * 60)
+    print("\n测试完成!")
+    print(f"  平均 PSNR: {avg_psnr:.4f}")
+    print(f"  平均 SSIM: {avg_ssim:.4f}")
+
+    csv_path = os.path.join(save_blind_dir, 'test_blind_metrics.csv')
+    if len(per_image_logs) > 0:
+        keys = ['image', 'group', 'psnr', 'ssim', 'blind_mae', 'blind_rmse', 'blind_psnr', 'blind_count']
+        with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(per_image_logs)
+        print(f"Per-image test metrics saved to: {csv_path}")
+
+    if blind_pix_sum > 0:
+        blind_mae = blind_abs_sum / blind_pix_sum
+        blind_mse = blind_sq_sum / blind_pix_sum
+        blind_rmse = float(np.sqrt(blind_mse))
+        blind_psnr = float(10.0 * np.log10((255.0 * 255.0) / max(blind_mse, 1e-12)))
+        print("===> Blind-Pixel Focused Metrics")
+        print(f"BlindCount(total sampled): {blind_pix_sum}")
+        print(f"Blind MAE: {blind_mae:.6f} | Blind RMSE: {blind_rmse:.6f} | Blind PSNR: {blind_psnr:.3f}")
+        if len(per_image_logs) > 0:
+            print(f"Blind per-image metrics saved to: {csv_path}")
+    else:
+        print("\nWARN: No blind pixels found in any image. Check your blind coordinate CSV files.")
+
+    return {
+        'psnr': float(avg_psnr),
+        'ssim': float(avg_ssim),
+        'blind_mae': float(blind_abs_sum / blind_pix_sum) if blind_pix_sum > 0 else 0.0,
+        'blind_rmse': float(np.sqrt(blind_sq_sum / blind_pix_sum)) if blind_pix_sum > 0 else 0.0,
+        'blind_psnr': float(10.0 * np.log10((255.0 * 255.0) / max(blind_sq_sum / blind_pix_sum, 1e-12))) if blind_pix_sum > 0 else 0.0,
+    }
 
 
 def main():

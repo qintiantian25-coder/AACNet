@@ -48,13 +48,10 @@ class CheckpointManager:
 
     def _cleanup_legacy_checkpoints(self):
         """删除旧版遗留检查点，保持目录中只剩一个 .pt 文件。"""
-        # 删除旧版遗留检查点（.pth）以及与当前 model_prefix 相关的历史文件，
-        # 以保证最终目录中只保留单一的 best_model.pt
+        # 删除旧版遗留检查点，最终仅保留 best_model.pt 与 last_state.pt
         legacy_patterns = [
-            os.path.join(self.checkpoint_dir, f'{self.model_prefix}.pth'),
-            os.path.join(self.checkpoint_dir, f'{self.model_prefix}_epoch_*.pth'),
-            os.path.join(self.checkpoint_dir, f'{self.model_prefix}*.pt'),
-            os.path.join(self.checkpoint_dir, 'last_state.pt'),
+            os.path.join(self.checkpoint_dir, '*.pth'),
+            os.path.join(self.checkpoint_dir, '*.pt'),
         ]
         for pattern in legacy_patterns:
             for legacy_file in glob.glob(pattern):
@@ -147,6 +144,16 @@ class CheckpointManager:
                 pass
             print(f"✓ 当前验证更新了最佳模型: {best_path}")
             print(f"  {self.metric_name}: {self.best_metric_value:.4f}")
+
+        try:
+            for f in glob.glob(os.path.join(self.checkpoint_dir, '*.pt')):
+                if os.path.basename(f) not in ('best_model.pt', 'last_state.pt'):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     
     def load_checkpoint(self, checkpoint_path, model, optimizer=None, scheduler=None, load_weights_only=False, use_best=False):
         """
@@ -228,15 +235,19 @@ class CheckpointManager:
     
     def find_latest_checkpoint(self):
         """找到最新的检查点"""
+        last_path = os.path.join(self.checkpoint_dir, 'last_state.pt')
+        if os.path.exists(last_path):
+            return last_path
+
+        best_path = os.path.join(self.checkpoint_dir, 'best_model.pt')
+        if os.path.exists(best_path):
+            return best_path
+
         pattern = os.path.join(self.checkpoint_dir, f'{self.model_prefix}*.pt')
         ckpt_files = glob.glob(pattern)
-        
         if not ckpt_files:
             return None
-        
-        # 按修改时间排序，返回最新的
-        latest_ckpt = max(ckpt_files, key=os.path.getmtime)
-        return latest_ckpt
+        return max(ckpt_files, key=os.path.getmtime)
     
     def remove_old_checkpoints(self, keep_num=3):
         """
