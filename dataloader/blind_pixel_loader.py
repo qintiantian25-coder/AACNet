@@ -223,8 +223,8 @@ class BlindPixelDataset(data.Dataset):
             if coords is not None:
                 mask = self._create_mask_from_coords(coords, shape)
 
-        # 2. 次选从盲元遮罩图像读取
-        if mask flee and static_mask_path:
+        # 2. 次选从盲元遮罩图像读取 (修复语法错误 mask flee -> mask is None)
+        if mask is None and static_mask_path:
             mask_img = cv2.imread(static_mask_path, cv2.IMREAD_GRAYSCALE)
             if mask_img is not None:
                 if mask_img.shape != shape:
