@@ -270,8 +270,10 @@ def run_test(config, device=None):
 
     metric_calc = MetricCalculator(config.crop_border)
     os.makedirs(config.results_dir, exist_ok=True)
+    save_triple = os.path.join(config.results_dir, 'triple_comparison')
     save_pure = os.path.join(config.results_dir, 'test')
     save_blind_dir = os.path.join(config.results_dir, 'blind_eval')
+    os.makedirs(save_triple, exist_ok=True)
     os.makedirs(save_pure, exist_ok=True)
     os.makedirs(save_blind_dir, exist_ok=True)
 
@@ -284,13 +286,45 @@ def run_test(config, device=None):
     blind_sq_sum = 0.0
     blind_pix_sum = 0
 
-    print(f"\n开始测试...")
+    def eval_group_csv(group_name):
+        group_label = group_name if group_name else 'root'
+        group_output_dir = os.path.join(save_pure, group_name) if group_name else save_pure
+        group_triple_dir = os.path.join(save_triple, group_name) if group_name else save_triple
+        if not os.path.isdir(group_output_dir):
+            return
+        if not os.path.isdir(group_triple_dir):
+            return
+        print(f"===> 子文件夹 {group_label} 推理完成，开始生成该子文件夹 CSV...")
+        group_csv_dir = os.path.join(save_blind_dir, group_label)
+        os.makedirs(group_csv_dir, exist_ok=True)
+        group_csv = os.path.join(group_csv_dir, 'test_blind_metrics.csv')
+        keys = ['image', 'group', 'psnr', 'ssim', 'blind_mae', 'blind_rmse', 'blind_psnr', 'blind_count']
+        group_rows = []
+        for row in per_image_logs:
+            if row.get('group') == group_label:
+                group_rows.append(row)
+        if len(group_rows) > 0:
+            with open(group_csv, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=keys)
+                writer.writeheader()
+                writer.writerows(group_rows)
+        print(f"Per-image test metrics saved to: {group_csv}")
+
+    print(f"===> 开始精准推理与可视化...")
+
+    current_group = None
     print("-" * 60)
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(test_loader):
             group_name = batch['group'][0]
             image_name = batch['name'][0]
+
+            if current_group is None:
+                current_group = group_name
+            elif group_name != current_group:
+                eval_group_csv(current_group)
+                current_group = group_name
 
             if group_name not in group_cache:
                 masks = resolve_group_mask_paths(mask_root, config.data_root, group_name)
@@ -326,6 +360,8 @@ def run_test(config, device=None):
             target_np = ((target[0].detach().cpu().numpy() + 1) / 2).transpose(1, 2, 0)
             output_uint8 = (np.clip(output_np, 0, 1) * 255).astype(np.uint8)
             target_uint8 = (np.clip(target_np, 0, 1) * 255).astype(np.uint8)
+            input_np = ((batch['blur'][0].detach().cpu().numpy() + 1) / 2).transpose(1, 2, 0)
+            input_uint8 = (np.clip(input_np, 0, 1) * 255).astype(np.uint8)
 
             psnr, ssim = metric_calc.calculate_psnr_ssim(output_uint8, target_uint8)
             if np.isfinite(psnr):
@@ -388,10 +424,23 @@ def run_test(config, device=None):
             if config.save_results:
                 group_dir = os.path.join(save_pure, group_name)
                 os.makedirs(group_dir, exist_ok=True)
+                triple_dir = os.path.join(save_triple, group_name)
+                os.makedirs(triple_dir, exist_ok=True)
+
+                input_tensor = torch.from_numpy(input_np.transpose(2, 0, 1)).float().unsqueeze(0)
+                output_tensor = torch.from_numpy(output_np.transpose(2, 0, 1)).float().unsqueeze(0)
+                target_tensor = torch.from_numpy(target_np.transpose(2, 0, 1)).float().unsqueeze(0)
+                comparison = torch.cat([input_tensor, output_tensor, target_tensor], dim=3)
+
+                from torchvision.utils import save_image
+                save_image(comparison, os.path.join(triple_dir, f"triple_{image_name}"))
                 cv2.imwrite(os.path.join(group_dir, image_name), cv2.cvtColor(output_uint8, cv2.COLOR_RGB2BGR))
 
             if (batch_idx + 1) % 10 == 0:
-                print(f"  处理 [{batch_idx + 1}/{len(test_loader)}] - PSNR: {psnr:.4f}, SSIM: {ssim:.4f}")
+                print(f"进度: {batch_idx + 1}/{len(test_loader)} | 正在保存: {image_name}")
+
+        if current_group is not None:
+            eval_group_csv(current_group)
 
     avg_psnr = np.mean(psnr_list) if psnr_list else 0.0
     avg_ssim = np.mean(ssim_list) if ssim_list else 0.0

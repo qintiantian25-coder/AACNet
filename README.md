@@ -223,10 +223,13 @@ python main.py --test --config_path ./experiment.cfg
 
 1. 读取 `test_blur`、`test_sharp`、`test_mask`。
 2. 自动加载 `./experiments/models/best_model.pt`。
-3. 对每个组优先读取 `blind_pixel_coords.csv`，再结合 `flash_pixel_coords.csv` 做 blind 统计。
-4. 计算全图 `psnr`、`ssim`。
-5. 计算 blind 专项 `blind_mae`、`blind_rmse`、`blind_psnr`。
-6. 保存每张图的输出结果和 CSV 指标文件。
+3. 将测试输出按组写入 `./results/aacnet_blind_test/test/<group>/`。
+4. 同时生成三联图到 `./results/aacnet_blind_test/triple_comparison/<group>/`，三联图内容为：`输入中心帧 | 模型修复结果 | 真值GT`。
+5. 对每个组优先读取 `blind_pixel_coords.csv`，再结合 `flash_pixel_coords.csv` 做 blind 统计。
+6. 计算全图 `psnr`、`ssim`。
+7. 计算 blind 专项 `blind_mae`、`blind_rmse`、`blind_psnr`。
+8. 每个组推理完成后，立即生成该组的 CSV：`./results/aacnet_blind_test/blind_eval/<group>/test_blind_metrics.csv`。
+9. 全部测试完成后，再汇总生成全量 CSV：`./results/aacnet_blind_test/blind_eval/test_blind_metrics.csv`。
 
 ### 7.1 测试输出
 
@@ -238,8 +241,10 @@ python main.py --test --config_path ./experiment.cfg
 
 其中一般会包含：
 
-- `test/`：修复后的输出图像。
-- `blind_eval/`：blind 指标 CSV。
+- `triple_comparison/`：三联图，按组保存。
+- `test/`：修复后的输出图像，按组保存。
+- `blind_eval/<group>/test_blind_metrics.csv`：各组盲元指标 CSV。
+- `blind_eval/test_blind_metrics.csv`：全测试集汇总 CSV。
 
 ## 8. 推荐的配置文件
 

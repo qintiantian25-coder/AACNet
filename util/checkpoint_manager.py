@@ -36,7 +36,7 @@ class CheckpointManager:
         existing_best = self.find_best_checkpoint()
         if existing_best and os.path.exists(existing_best):
             try:
-                checkpoint = torch.load(existing_best, map_location='cpu')
+                checkpoint = torch.load(existing_best, map_location='cpu', weights_only=False)
                 self.best_metric_value = checkpoint.get('best_metric_value', checkpoint.get('metrics', {}).get(self.metric_name))
                 self.best_epoch = checkpoint.get('best_epoch', checkpoint.get('epoch'))
                 self.best_model_state_dict = checkpoint.get('best_model_state_dict', checkpoint.get('last_model_state_dict', checkpoint.get('model_state_dict')))
@@ -172,7 +172,7 @@ class CheckpointManager:
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"检查点不存在: {checkpoint_path}")
         
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
         # 加载模型权重
         if use_best and checkpoint.get('best_model_state_dict') is not None:
