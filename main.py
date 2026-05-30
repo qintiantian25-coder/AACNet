@@ -145,12 +145,10 @@ def train(config, device):
     
     # 创建模型
     print("\n正在构建模型...")
-    # create_model期望opt.model属性，所以设置它
     config.model = config.model_name
-    # 添加模型期望的其他属性
     config.lr = config.learning_rate
     config.isTrain = True
-    # 添加checkpoint相关的参数
+    
     if not hasattr(config, 'checkpoints_dir'):
         config.checkpoints_dir = config.checkpoint_dir
     if not hasattr(config, 'name'):
@@ -162,11 +160,9 @@ def train(config, device):
     
     model = create_model(config)
 
-    # ==================== 显存优化核心修改位置 ====================
-    # 在扔进 DDP 包装之前，必须先把底层的 net_G 移动到当前 rank 分配的单卡设备上。
+    # 显存优化：在 DDP 包装之前，先将底层的 net_G 移动到当前 rank 设备上
     if hasattr(model, 'net_G'):
         model.net_G = model.net_G.to(device)
-    # ============================================================
     
     if is_distributed and config.world_size > 1 and hasattr(model, 'net_G'):
         model.net_G = DDP(
@@ -178,7 +174,7 @@ def train(config, device):
         )
     print(f"  模型: {config.model_name}")
     
-    # 创建检查点管理器（所有进程都需要用于恢复；写入只在主进程进行）
+    # 创建检查点管理器
     checkpoint_manager = CheckpointManager(config, config.best_metric)
     
     # 创建日志记录器（仅主进程写日志）
@@ -201,7 +197,6 @@ def train(config, device):
             use_best=False
         )
     elif config.resume_training:
-        # 自动寻找最新的训练状态文件
         latest_ckpt = checkpoint_manager.find_latest_checkpoint()
         if latest_ckpt:
             print(f"\n从最新训练状态恢复: {latest_ckpt}")
@@ -240,7 +235,7 @@ def train(config, device):
             if train_logger is not None:
                 train_logger.log(f"Epoch {epoch + 1}/{config.num_epochs} - LR: {current_lr:.6f}")
 
-        # 保存当前训练状态到单一检查点文件，便于随时续训
+        # 保存当前训练状态（统一保存在主进程）
         if is_main_process:
             checkpoint_manager.save_checkpoint(
                 model,
@@ -251,10 +246,10 @@ def train(config, device):
                 is_best=False
             )
         
-        # 验证阶段（每val_interval轮进行一次）
+        # 验证阶段
         if (epoch + 1) % config.val_interval == 0:
             if is_distributed:
-                dist.barrier()
+                dist.barrier()  # 验证前同步：所有人停下，准备跑验证
 
             val_metrics = validate(model, val_loader, device, config, epoch, train_logger, val_logger, metric_calc) if is_main_process else None
             
@@ -266,12 +261,10 @@ def train(config, device):
                     best_metric = current_metric
                     is_best = True
                 elif config.best_metric == 'psnr':
-                    # PSNR越高越好
                     is_best = current_metric > best_metric
                     if is_best:
                         best_metric = current_metric
                 else:
-                    # 其他指标（如loss）越低越好
                     is_best = current_metric < best_metric
                     if is_best:
                         best_metric = current_metric
@@ -296,7 +289,7 @@ def train(config, device):
                             val_logger.log(f"本次验证未刷新最佳模型: {config.best_metric}={current_metric:.4f}, 当前最佳={best_metric:.4f}", echo=False)
 
             if is_distributed:
-                dist.barrier()
+                dist.barrier()  # 验证后同步：确保主进程更新保存完模型后，其余卡才能继续往前走，防止死锁
         
         if train_logger is not None:
             train_logger.log(f"Epoch {epoch + 1}/{config.num_epochs} - Train Loss: {train_loss:.4f}")
@@ -318,18 +311,6 @@ def train(config, device):
 def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
     """
     训练单个epoch
-    
-    Args:
-        model: 模型
-        dataloader: 训练数据加载器
-        optimizer: 优化器（未使用，模型内部有自己的优化器）
-        device: 计算设备
-        config: 配置
-        epoch: 当前epoch
-        logger: 日志记录器
-    
-    Returns:
-        avg_loss: 平均损失
     """
     set_model_train_mode(model)
     total_loss = 0.0
@@ -343,15 +324,14 @@ def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
             'img_path': batch['img_path']
         }
         
-        # 扩展mask到3通道
-        if input_data['mask'].shape[1] == 1:
-            input_data['mask'] = input_data['mask'].repeat(1, 3, 1, 1)
+        # 修正：移除强行对 mask 执行 .repeat(1, 3, 1, 1) 的逻辑，
+        # 让掩码保持 [B, 1, H, W] 的标准形态，交由模型内部自动完成通道广播。
         
         # 设置输入并优化参数
         model.set_input(input_data)
         model.optimize_parameters()
         
-        # 计算损失（兼容 tensor/float，统一转为 python float 后再累计）
+        # 计算损失
         loss_dict = model.get_current_errors()
         batch_loss = sum(v.item() if torch.is_tensor(v) else float(v) for v in loss_dict.values())
         total_loss += batch_loss
@@ -369,19 +349,6 @@ def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
 def validate(model, dataloader, device, config, epoch, train_logger, val_logger, metric_calc):
     """
     验证函数
-    
-    Args:
-        model: 模型
-        dataloader: 验证数据加载器
-        device: 计算设备
-        config: 配置
-        epoch: 当前epoch
-        train_logger: 训练日志记录器
-        val_logger: 验证日志记录器
-        metric_calc: 指标计算器
-    
-    Returns:
-        metrics: 验证指标字典
     """
     print(f"\n验证 Epoch {epoch + 1}...")
     set_model_eval_mode(model)
@@ -398,19 +365,16 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
             'img_path': batch['img_path']
         }
         
-        # 扩展mask到3通道
-        if input_data['mask'].shape[1] == 1:
-            input_data['mask'] = input_data['mask'].repeat(1, 3, 1, 1)
+        # 修正：同样移除此处对 mask 强行 .repeat(1, 3, 1, 1) 的逻辑
         
         # 前向传播
         model.set_input(input_data)
         model.test()
         
-        # === 新增：获取当前验证 batch 的验证损失，填补原本空白的 loss_list ===
+        # 获取当前验证 batch 的验证损失
         loss_dict = model.get_current_errors()
         if loss_dict:
             loss_list.append(sum(v.item() if torch.is_tensor(v) else float(v) for v in loss_dict.values()))
-        # ================================================================
         
         # 获取输出
         output = model.img_out  # [-1, 1]
@@ -440,8 +404,6 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
     # 计算平均指标
     avg_psnr = np.mean(psnr_list) if psnr_list else 0.0
     avg_ssim = np.mean(ssim_list) if ssim_list else 0.0
-    
-    # === 健壮性增强：确保 loss_list 确实有数据才计算平均值，防止空列表计算报错 ===
     avg_loss = np.mean(loss_list) if (loss_list and len(loss_list) > 0) else 0.0
     
     metrics = {
@@ -468,8 +430,6 @@ def test(config, device):
 
 def save_visual_result(output, target, name, save_dir, epoch):
     """保存可视化结果"""
-    import cv2
-    
     # 转换为BGR格式保存
     output_bgr = output[:, :, ::-1]
     target_bgr = target[:, :, ::-1]
@@ -517,7 +477,7 @@ def main():
     # 打印配置
     config_loader.print_config()
 
-    # 规范 GPU id：如果 CUDA 可用但配置的 gpu_ids 超过可见数量，进行截断并提示。
+    # 规范 GPU id
     try:
         import torch
         if torch.cuda.is_available():
@@ -526,7 +486,6 @@ def main():
                 print(f"警告: 配置中 gpu_ids={config.gpu_ids}，但当前可见 GPU 数量为 {visible_cnt}，将截断为前 {visible_cnt} 个 id。")
                 config.gpu_ids = config.gpu_ids[:visible_cnt]
         else:
-            # 无 CUDA 可用，清空 gpu_ids
             config.gpu_ids = []
     except Exception:
         pass

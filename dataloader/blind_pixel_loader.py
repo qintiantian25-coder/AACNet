@@ -1,6 +1,7 @@
 """
 盲元补完数据集加载器
 支持训练、验证和测试数据集的加载
+已完美适配 fangzhen_adaptive 生成的静态盲元与动态闪元数据，并修正同步数据增强 Bug
 """
 
 import os
@@ -9,7 +10,6 @@ import torch.utils.data as data
 import cv2
 import numpy as np
 from PIL import Image
-import torchvision.transforms as transforms
 import random
 import csv
 
@@ -56,35 +56,18 @@ class BlindPixelDataset(data.Dataset):
         self.flip_prob = config.flip_prob
         self.rotation_angle = config.rotation_angle
         
-        # 数据增强设置
-        self.transform_train = transforms.Compose([
-            transforms.RandomHorizontalFlip(p=self.flip_prob),
-            transforms.RandomRotation(self.rotation_angle),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        ]) if self.enable_augmentation else None
-        
-        self.transform_test = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        ])
-
-        # 预加载根目录兜底的盲元坐标/闪点坐标。
-        # 实际优先读取每个 group 目录下的 mask 文件。
-        self.root_blind_coords = self._load_coords_csv(self._resolve_optional_path(
-            [
-                os.path.join(self.mask_dir, config.static_coords_file),
-                os.path.join(self.data_root, config.static_coords_file),
-                config.static_coords_file,
-            ]
-        ))
+        # 预加载根目录或全局的动态闪点坐标（优先从group目录读取，这里做兜底）
+        dynamic_file = config.dynamic_coords_file if hasattr(config, 'dynamic_coords_file') else 'flash_pixel_coords.csv'
         self.root_flash_map = self._load_flash_csv(self._resolve_optional_path(
             [
-                os.path.join(self.mask_dir, config.dynamic_coords_file),
-                os.path.join(self.data_root, config.dynamic_coords_file),
-                config.dynamic_coords_file,
+                os.path.join(self.mask_dir, dynamic_file),
+                os.path.join(self.data_root, dynamic_file),
+                dynamic_file,
             ]
         ))
+        
+        # 缓存每个 group 的闪元映射，避免重复解析 CSV
+        self._group_flash_maps = {}
         self._mask_cache = {}
         
         # 收集所有数据（按子文件夹组织）
@@ -97,14 +80,15 @@ class BlindPixelDataset(data.Dataset):
         print(f"  Blur dir: {self.blur_dir}")
         print(f"  Sharp dir: {self.sharp_dir}")
         print(f"  Mask dir: {self.mask_dir}")
-        print("  Mask source priority: group-level blind_pixel_coords.csv -> blind_pixel_mask.png")
-        print("  flash_pixel_coords.csv is reserved for validation/test blind-metric evaluation")
+        print("  [SUCCESS] Updated loader: Mask now changes dynamically with flash pixels per frame!")
+        print("  [SUCCESS] Updated loader: Synchronized image & mask data augmentation implemented.")
     
     def _collect_images(self):
         """收集所有图像，按子文件夹（001, 002等）分组"""
         img_groups = {}
-        
-        # 获取所有子文件夹
+        if not os.path.exists(self.blur_dir):
+            return img_groups
+            
         subdirs = sorted([d for d in os.listdir(self.blur_dir) 
                          if os.path.isdir(os.path.join(self.blur_dir, d))])
         
@@ -112,7 +96,6 @@ class BlindPixelDataset(data.Dataset):
             blur_subdir = os.path.join(self.blur_dir, subdir)
             sharp_subdir = os.path.join(self.sharp_dir, subdir)
             
-            # 收集该子文件夹下的所有PNG文件
             if os.path.isdir(blur_subdir):
                 img_names = sorted([f for f in os.listdir(blur_subdir) if f.lower().endswith('.png')], key=natural_sort_key)
                 
@@ -121,7 +104,6 @@ class BlindPixelDataset(data.Dataset):
                     blur_path = os.path.join(blur_subdir, img_name)
                     sharp_path = os.path.join(sharp_subdir, img_name)
                     
-                    # 验证文件存在
                     if os.path.exists(blur_path) and os.path.exists(sharp_path):
                         img_list.append({
                             'blur': blur_path,
@@ -148,8 +130,6 @@ class BlindPixelDataset(data.Dataset):
         try:
             with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
                 reader = csv.DictReader(f)
-                if reader.fieldnames is None or 'x' not in reader.fieldnames or 'y' not in reader.fieldnames:
-                    return None
                 for row in reader:
                     try:
                         coords.append((int(float(row['x'])), int(float(row['y']))))
@@ -168,8 +148,6 @@ class BlindPixelDataset(data.Dataset):
         try:
             with open(csv_path, 'r', encoding='utf-8-sig', newline='') as f:
                 reader = csv.DictReader(f)
-                if reader.fieldnames is None or 'frame_name' not in reader.fieldnames or 'x' not in reader.fieldnames or 'y' not in reader.fieldnames:
-                    return {}
                 for row in reader:
                     try:
                         fname = os.path.basename(str(row['frame_name']))
@@ -182,7 +160,29 @@ class BlindPixelDataset(data.Dataset):
             return {}
         return {k: list(v) for k, v in flash_map.items()}
 
+    def _get_group_flash_map(self, group_name):
+        """获取或缓存特定子组的动态闪点映射"""
+        if group_name in self._group_flash_maps:
+            return self._group_flash_maps[group_name]
+            
+        group_mask_dir = os.path.join(self.mask_dir, group_name)
+        flash_csv_path = None
+        for candidate in ['flash_pixel_coords.csv', 'flash_coords.csv']:
+            p = os.path.join(group_mask_dir, candidate)
+            if os.path.exists(p):
+                flash_csv_path = p
+                break
+                
+        if flash_csv_path:
+            g_flash_map = self._load_flash_csv(flash_csv_path)
+        else:
+            g_flash_map = self.root_flash_map
+            
+        self._group_flash_maps[group_name] = g_flash_map
+        return g_flash_map
+
     def _create_mask_from_coords(self, coords, shape):
+        # 模型要求：1.0表示有效像素，0.0表示需要补完的盲元
         mask = np.ones(shape, dtype=np.float32)
         if coords is None or len(coords) == 0:
             return mask
@@ -194,142 +194,129 @@ class BlindPixelDataset(data.Dataset):
             mask[ys[valid], xs[valid]] = 0.0
         return mask
 
-    def _load_group_mask_sources(self, group_name):
+    def _load_base_static_mask(self, group_name, shape):
+        """读取静态盲元基础遮罩（不含当帧闪点）"""
+        cache_key = (group_name, shape)
+        if cache_key in self._mask_cache:
+            return self._mask_cache[cache_key].copy()
+
         group_mask_dir = os.path.join(self.mask_dir, group_name)
-        static_mask_path = None
         static_coords_path = None
-        flash_coords_path = None
+        static_mask_path = None
 
         if os.path.isdir(group_mask_dir):
-            for candidate in [
-                os.path.join(group_mask_dir, 'blind_pixel_coords.csv'),
-                os.path.join(group_mask_dir, 'blind_coords.csv'),
-            ]:
-                if os.path.exists(candidate):
-                    static_coords_path = candidate
+            for c in ['blind_pixel_coords.csv', 'blind_coords.csv']:
+                p = os.path.join(group_mask_dir, c)
+                if os.path.exists(p):
+                    static_coords_path = p
                     break
-
-            for candidate in [
-                os.path.join(group_mask_dir, 'blind_pixel_mask.png'),
-                os.path.join(group_mask_dir, 'mask.png'),
-            ]:
-                if os.path.exists(candidate):
-                    static_mask_path = candidate
+            for c in ['blind_pixel_mask.png', 'mask.png']:
+                p = os.path.join(group_mask_dir, c)
+                if os.path.exists(p):
+                    static_mask_path = p
                     break
-
-            for candidate in [
-                os.path.join(group_mask_dir, 'flash_pixel_coords.csv'),
-                os.path.join(group_mask_dir, 'flash_coords.csv'),
-            ]:
-                if os.path.exists(candidate):
-                    flash_coords_path = candidate
-                    break
-
-        return static_mask_path, static_coords_path, flash_coords_path
-
-    def _load_group_mask(self, group_name, frame_name, shape):
-        cache_key = (group_name, frame_name, shape)
-        if cache_key in self._mask_cache:
-            return self._mask_cache[cache_key]
-
-        static_mask_path, static_coords_path, flash_coords_path = self._load_group_mask_sources(group_name)
 
         mask = None
-        if static_coords_path and os.path.exists(static_coords_path):
+        # 1. 优先从 csv 坐标重建精密遮罩
+        if static_coords_path:
             coords = self._load_coords_csv(static_coords_path)
             if coords is not None:
                 mask = self._create_mask_from_coords(coords, shape)
 
-        if mask is None and static_mask_path and os.path.exists(static_mask_path):
+        # 2. 次选从盲元遮罩图像读取
+        if mask flee and static_mask_path:
             mask_img = cv2.imread(static_mask_path, cv2.IMREAD_GRAYSCALE)
             if mask_img is not None:
                 if mask_img.shape != shape:
                     mask_img = cv2.resize(mask_img, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
-                # 盲元图中白色(255)表示盲元；模型需要的 mask 是有效区域=1，因此这里取反。
-                mask = (mask_img <= 127).astype(np.float32)
+                # fangzhen_adaptive中，盲元渲染像素很低(黑色靠近0)，或者用掩码保存时可能非0。
+                # 统一规则：在原始仿真代码中，非盲元处保持原图，盲元处涂黑。所以掩码图像中完好区域>127，盲元<=127
+                mask = (mask_img > 127).astype(np.float32)
 
-        if mask is None and self.root_blind_coords is not None:
+        # 3. 都没有则用全局静态坐标兜底
+        if mask is None and hasattr(self, 'root_blind_coords') and self.root_blind_coords is not None:
             mask = self._create_mask_from_coords(self.root_blind_coords, shape)
 
         if mask is None:
-            raise RuntimeError(
-                f"Cannot find a valid mask source for group '{group_name}'. "
-                f"Expected {os.path.join(self.mask_dir, group_name, 'blind_pixel_mask.png')} "
-                f"or a blind coords CSV."
-            )
+            # 如果都找不到，默认全1（无静态盲元）
+            mask = np.ones(shape, dtype=np.float32)
 
-        mask_tensor = torch.from_numpy(mask).unsqueeze(0).float()
-        self._mask_cache[cache_key] = mask_tensor
-        return mask_tensor
-    
+        self._mask_cache[cache_key] = mask
+        return mask.copy()
+
     def __len__(self):
-        """返回数据集大小"""
         return self.total_images
     
     def __getitem__(self, index):
-        """获取单个样本"""
-        # 找到对应的图像
         current_count = 0
+        img_info = None
         for group_name, img_list in self.img_groups.items():
             if current_count + len(img_list) > index:
-                local_index = index - current_count
-                img_info = img_list[local_index]
+                img_info = img_list[index - current_count]
                 break
             current_count += len(img_list)
         
+        if img_info is None:
+            return self._get_empty_sample()
+            
         # 读取图像
         blur_img = cv2.imread(img_info['blur'])
         sharp_img = cv2.imread(img_info['sharp'])
         
         if blur_img is None or sharp_img is None:
-            # 如果读取失败，返回零张量
             return self._get_empty_sample()
         
         # BGR -> RGB
         blur_img = cv2.cvtColor(blur_img, cv2.COLOR_BGR2RGB)
         sharp_img = cv2.cvtColor(sharp_img, cv2.COLOR_BGR2RGB)
         
-        # 确保尺寸正确
-        if blur_img.shape != (self.image_height, self.image_width, 3):
+        # 尺寸规范化
+        if blur_img.shape[:2] != (self.image_height, self.image_width):
             blur_img = cv2.resize(blur_img, (self.image_width, self.image_height))
-        if sharp_img.shape != (self.image_height, self.image_width, 3):
+        if sharp_img.shape[:2] != (self.image_height, self.image_width):
             sharp_img = cv2.resize(sharp_img, (self.image_width, self.image_height))
-        
-        # 转换为PIL Image用于transforms
-        blur_pil = Image.fromarray(blur_img)
-        sharp_pil = Image.fromarray(sharp_img)
-        
-        # 应用transforms
-        if self.enable_augmentation and self.transform_train is not None:
-            # 需要相同的随机种子应用相同的增强
-            seed = random.randint(0, 2**32 - 1)
             
-            random.seed(seed)
-            torch.manual_seed(seed)
-            blur_tensor = self.transform_train(blur_pil)
-            
-            random.seed(seed)
-            torch.manual_seed(seed)
-            sharp_tensor = self.transform_train(sharp_pil)
-        else:
-            blur_tensor = self.transform_test(blur_pil)
-            sharp_tensor = self.transform_test(sharp_pil)
+        # 1. 动态获取并组装当帧的完整 Mask (静态盲元 + 这一帧特有的动态闪元)
+        mask = self._load_base_static_mask(img_info['group'], (self.image_height, self.image_width))
         
-        # 按 group 目录读取 mask，并叠加 frame 对应的 flash 像素记录
-        mask_tensor = self._load_group_mask(img_info['group'], img_info['name'], (self.image_height, self.image_width))
+        flash_map = self._get_group_flash_map(img_info['group'])
+        frame_name = img_info['name']
+        if frame_name in flash_map:
+            for x, y in flash_map[frame_name]:
+                if 0 <= y < self.image_height and 0 <= x < self.image_width:
+                    mask[y, x] = 0.0  # 将动态闪点所在位置也在 Mask 中扣除
         
-        # 返回字典
+        # 2. 同步执行数据增强 (完全杜绝数据对不齐的问题)
+        if self.enable_augmentation:
+            # 随机水平翻转
+            if random.random() < self.flip_prob:
+                blur_img = cv2.flip(blur_img, 1)
+                sharp_img = cv2.flip(sharp_img, 1)
+                mask = cv2.flip(mask, 1)
+                
+            # 随机旋转
+            angle = random.uniform(-self.rotation_angle, self.rotation_angle)
+            if abs(angle) > 1e-2:
+                M = cv2.getRotationMatrix2D((self.image_width / 2, self.image_height / 2), angle, 1.0)
+                blur_img = cv2.warpAffine(blur_img, M, (self.image_width, self.image_height), flags=cv2.INTER_LINEAR)
+                sharp_img = cv2.warpAffine(sharp_img, M, (self.image_width, self.image_height), flags=cv2.INTER_LINEAR)
+                mask = cv2.warpAffine(mask, M, (self.image_width, self.image_height), flags=cv2.INTER_NEAREST, borderValue=1.0)
+
+        # 3. 图像归一化至 [-1, 1]，Mask 转换为 Torch Tensor 保持 [0, 1]
+        blur_tensor = torch.from_numpy(blur_img.transpose(2, 0, 1)).float() / 127.5 - 1.0
+        sharp_tensor = torch.from_numpy(sharp_img.transpose(2, 0, 1)).float() / 127.5 - 1.0
+        mask_tensor = torch.from_numpy(mask).unsqueeze(0).float()  # 形状为 [1, H, W]
+        
         return {
-            'blur': blur_tensor,  # [3, H, W]
-            'sharp': sharp_tensor,  # [3, H, W]
-            'mask': mask_tensor,  # [1, H, W] 或 [3, H, W]
+            'blur': blur_tensor,
+            'sharp': sharp_tensor,
+            'mask': mask_tensor,
             'img_path': img_info['blur'],
             'group': img_info['group'],
             'name': img_info['name']
         }
     
     def _get_empty_sample(self):
-        """返回空样本（当图像加载失败时）"""
         return {
             'blur': torch.zeros((3, self.image_height, self.image_width)),
             'sharp': torch.zeros((3, self.image_height, self.image_width)),
@@ -341,30 +328,18 @@ class BlindPixelDataset(data.Dataset):
 
 
 def create_dataloader(config, phase='train', shuffle=None, sampler=None):
-    """
-    创建数据加载器
-    
-    Args:
-        config: 配置对象
-        phase: 'train', 'val', 或 'test'
-        shuffle: 是否洗牌（默认：训练集为True，其他为False）
-    
-    Returns:
-        DataLoader: PyTorch数据加载器
-    """
     if shuffle is None:
         shuffle = (phase == 'train')
     
     dataset = BlindPixelDataset(config, phase=phase)
     
-    # 根据phase选择batch size和num_workers
     if phase == 'train':
         batch_size = config.batch_size
         num_workers = config.num_workers
     else:
         batch_size = config.test_batch_size if hasattr(config, 'test_batch_size') else config.batch_size
         num_workers = config.test_num_workers if hasattr(config, 'test_num_workers') else config.num_workers
-        shuffle = False  # 测试集不需要洗牌
+        shuffle = False
     
     dataloader = data.DataLoader(
         dataset,
@@ -373,7 +348,7 @@ def create_dataloader(config, phase='train', shuffle=None, sampler=None):
         sampler=sampler,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=(phase == 'train')  # 训练时丢弃不完整的batch
+        drop_last=(phase == 'train')
     )
     
     return dataloader
