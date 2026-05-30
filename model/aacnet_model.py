@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import os
 
-# 检查高版本 PyTorch 兼容性，避免 GradScaler 弃用警告
+# 檢查高版本 PyTorch 兼容性，避免 GradScaler 棄用警告
 try:
     from torch.amp import autocast, GradScaler
 except ImportError:
@@ -14,7 +14,7 @@ from util import util
 
 
 class AACNetBlind(BaseModel):
-    """AACNet 模型用于盲元补完测试与训练"""
+    """AACNet 模型用於盲元補完測試與訓練"""
 
     def name(self):
         return "AACNet Blind Completion"
@@ -34,7 +34,7 @@ class AACNetBlind(BaseModel):
         self.model_names = ['G']
         self.isTrain = opt.isTrain
         
-        # 混合精度设置
+        # 混合精度設置
         self.use_amp = bool(getattr(opt, 'mixed_precision', False) and torch.cuda.is_available())
         try:
             # 兼容低版本和高版本 PyTorch 的 GradScaler 初始化
@@ -42,12 +42,12 @@ class AACNetBlind(BaseModel):
         except Exception:
             self.scaler = GradScaler(enabled=self.use_amp)
 
-        # 创建生成器
+        # 創建生成器
         self.net_G = aacnet.define_g(gpu_ids=opt.gpu_ids, image_size=(opt.image_height, opt.image_width))
 
         if self.isTrain:
             self.criterionL1 = nn.L1Loss()
-            # 防御性读取：若 opt 里是 learning_rate 则兼容
+            # 防禦性讀取：若 opt 裡是 learning_rate 則兼容
             lr_val = opt.lr if hasattr(opt, 'lr') else getattr(opt, 'learning_rate', 0.0001)
             self.optimizer_G = torch.optim.Adam(
                 filter(lambda p: p.requires_grad, self.net_G.parameters()),
@@ -57,18 +57,18 @@ class AACNetBlind(BaseModel):
             self.optimizers.append(self.optimizer_G)
 
         if self.isTrain:
-            # 训练模式只初始化优化器与调度器
+            # 訓練模式只初始化優化器與調度器
             self.setup(opt)
 
     def set_input(self, input_data, epoch=0):
         """
-        从数据加载器中解包输入数据
-        增加了高级防御与自动对齐逻辑，彻底根除 KeyError: 'blur' 隐患
+        從數據加載器中解包輸入數據
+        增加了高級防禦與自動對齊邏輯，徹底根除 KeyError: 'blur' 隱患
         """
         self.image_paths = input_data.get('img_path', [])
         
-        # --- 核心安全防御逻辑 ---
-        # 如果 Dataloader 吐出的数据中确实缺失了标准键名，尝试进行智能映射兼容
+        # --- 核心安全防禦邏輯 ---
+        # 如果 Dataloader 吐出的數據中確實缺失了標準鍵名，嘗試進行智能映射兼容
         if 'blur' not in input_data:
             fallback_mapping = {
                 'lq': 'blur', 'input': 'blur', 'img_blur': 'blur',
@@ -82,9 +82,9 @@ class AACNetBlind(BaseModel):
                     mapped_data[k] = v
             input_data = mapped_data
 
-        # 如果经过映射后依然完全找不到核心键，则触发动态补全，确保程序绝对不会报 KeyError 崩溃
+        # 如果經過映射後依然完全找不到核心鍵，則觸發動態補全，確保程序絕對不會報 KeyError 崩潰
         if 'blur' not in input_data:
-            # 获取当前 Batch 的设备和大小，动态创建一个全零的 dummy tensor 维持网络训练不断裂
+            # 獲取當前 Batch 的設備和大小，動態創建一個全零的 dummy tensor 維持網絡訓練不斷裂
             for val in input_data.values():
                 if isinstance(val, torch.Tensor):
                     b_size = val.size(0)
@@ -100,26 +100,26 @@ class AACNetBlind(BaseModel):
             input_data['mask'] = torch.ones((b_size, 1, h, w), device=device)
         # ------------------------
 
-        # 安全提取经过防御处理后的数据
+        # 安全提取經過防禦處理後的數據
         img_blur = input_data['blur']    # [B, 3, H, W]
         img_sharp = input_data['sharp']  # [B, 3, H, W]
         mask = input_data['mask']        # [B, 1, H, W] 或 [B, 3, H, W]
 
-        # 设备搬运
+        # 設備搬運
         if len(self.gpu_ids) > 0:
             target_device = f'cuda:{self.gpu_ids[0]}'
             img_blur = img_blur.to(target_device)
             img_sharp = img_sharp.to(target_device)
             mask = mask.to(target_device)
 
-        self.img_truth = img_sharp  # 干净的真值目标 [-1, 1]
-        self.mask = mask            # mask [0, 1]，1表示有效区域，0表示盲元区域
-        self.img_m = img_blur       # 直接使用含盲元/闪元的模糊图像
+        self.img_truth = img_sharp  # 乾淨的真值目標 [-1, 1]
+        self.mask = mask            # mask [0, 1]，1表示有效區域，0表示盲元區域
+        self.img_m = img_blur       # 直接使用含盲元/閃元的模糊圖像
 
     def test(self):
         """Forward function used in test time"""
         self.net_G.eval()
-        mask_single = self.mask[:, 0:1, :, :]  # 确保是 [B, 1, H, W]
+        mask_single = self.mask[:, 0:1, :, :]  # 確保是 [B, 1, H, W]
         self.img_g, self.x_outs = self.net_G(self.img_m, mask_single)
         self.img_out = self.img_g * (1 - self.mask) + self.img_truth * self.mask
 
@@ -132,7 +132,9 @@ class AACNetBlind(BaseModel):
     def optimize_parameters(self):
         """Optimize generator parameters for blind completion training"""
         self.optimizer_G.zero_grad(set_to_none=True)
-        with autocast(enabled=self.use_amp):
+        
+        # 核心修復：顯式指定 device_type='cuda'，徹底解決新版本 PyTorch 的 TypeError 報錯
+        with autocast(device_type='cuda', enabled=self.use_amp):
             self.forward()
             self.loss_l1 = self.criterionL1(self.img_out, self.img_truth)
 
