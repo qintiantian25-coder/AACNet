@@ -229,9 +229,9 @@ class BlindPixelDataset(data.Dataset):
             if mask_img is not None:
                 if mask_img.shape != shape:
                     mask_img = cv2.resize(mask_img, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
-                # fangzhen_adaptive中，盲元渲染像素很低(黑色靠近0)，或者用掩码保存时可能非0。
-                # 统一规则：在原始仿真代码中，非盲元处保持原图，盲元处涂黑。所以掩码图像中完好区域>127，盲元<=127
-                mask = (mask_img > 127).astype(np.float32)
+                # fangzhen_adaptive.py masks: blind pixel -> 255 (white), valid pixel -> 0 (black)
+                # Model expects: 1.0 valid, 0.0 blind. Invert: white (255) → 0.0, black (0) → 1.0
+                mask = (mask_img <= 127).astype(np.float32)
 
         # 3. 都没有则用全局静态坐标兜底
         if mask is None and hasattr(self, 'root_blind_coords') and self.root_blind_coords is not None:

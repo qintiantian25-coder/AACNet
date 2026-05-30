@@ -1,10 +1,3 @@
-这里为您提供修改和优化完成后的完整 `test.py` 代码。
-
-该版本完美适配了您的盲元与闪元评估数据结构，修复了单卡/多卡模式下潜在的兼容性问题，并对盲元区域特定指标（Blind MAE, Blind RMSE, Blind PSNR）以及全局指标（PSNR, SSIM）进行了严谨的定量计算。
-
-### 完整的 `test.py` 源码
-
-```python
 """
 AACNet 盲元补完网络 - 定量评估与测试脚本
 支持按子目录（Group）统计与全数据集汇总，计算全局指标及盲元/闪元特定区域指标。
@@ -232,7 +225,8 @@ def run_test(config, device=None):
     for idx, batch in enumerate(test_loader):
         # 创建标准的输入形态，保持 mask 为原生的单通道状态 [B, 1, H, W]
         input_data = {
-            'img': batch['blur'].to(device),
+            'blur': batch['blur'].to(device),
+            'sharp': batch['sharp'].to(device),
             'mask': batch['mask'].to(device),
             'img_path': batch['img_path']
         }

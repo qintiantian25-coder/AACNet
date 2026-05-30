@@ -319,15 +319,12 @@ def train_epoch(model, dataloader, optimizer, device, config, epoch, logger):
     for batch_idx, batch in enumerate(dataloader):
         # 创建输入字典
         input_data = {
-            'img': batch['blur'].to(device),
+            'blur': batch['blur'].to(device),
+            'sharp': batch['sharp'].to(device),
             'mask': batch['mask'].to(device),
             'img_path': batch['img_path']
         }
-        
-        # 修正：移除强行对 mask 执行 .repeat(1, 3, 1, 1) 的逻辑，
-        # 让掩码保持 [B, 1, H, W] 的标准形态，交由模型内部自动完成通道广播。
-        
-        # 设置输入并优化参数
+
         model.set_input(input_data)
         model.optimize_parameters()
         
@@ -360,14 +357,12 @@ def validate(model, dataloader, device, config, epoch, train_logger, val_logger,
     for batch_idx, batch in enumerate(dataloader):
         # 创建输入字典
         input_data = {
-            'img': batch['blur'].to(device),
+            'blur': batch['blur'].to(device),
+            'sharp': batch['sharp'].to(device),
             'mask': batch['mask'].to(device),
             'img_path': batch['img_path']
         }
-        
-        # 修正：同样移除此处对 mask 强行 .repeat(1, 3, 1, 1) 的逻辑
-        
-        # 前向传播
+
         model.set_input(input_data)
         model.test()
         
