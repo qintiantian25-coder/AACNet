@@ -5,6 +5,7 @@ AACNet 盲元补完网络 - 测试与定量评估脚本
 import os
 import re
 import csv
+import cv2
 import numpy as np
 import torch
 import torchvision
