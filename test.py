@@ -176,7 +176,10 @@ def run_test(config, device=None):
     model.eval()
 
     ckpt_mgr = CheckpointManager(config, config.best_metric)
-    load_path = getattr(config, 'checkpoint_path', '') or os.path.join(config.checkpoint_dir, 'best_model.pt')
+    # 测试时优先使用当前实验目录下的模型，不使用训练 resume 的 checkpoint_path
+    load_path = os.path.join(config.checkpoint_dir, 'best_model.pt')
+    if not os.path.exists(load_path):
+        load_path = getattr(config, 'checkpoint_path', '') or os.path.join(config.checkpoint_dir, 'best_model.pt')
     if os.path.exists(load_path):
         print(f"  加载权重: {load_path}")
         ckpt_mgr.load_checkpoint(load_path, model, load_weights_only=True)
