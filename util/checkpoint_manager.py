@@ -10,11 +10,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 class CheckpointManager:
     """管理模型检查点"""
-    
+
     def __init__(self, config, metric_name='psnr'):
         """
         初始化检查点管理器
-        
+
         Args:
             config: 配置对象
             metric_name: 用于评估的指标名称 ('psnr' 或 'loss')
@@ -29,7 +29,7 @@ class CheckpointManager:
         self.best_optimizer_state_dict = None
         self.best_scheduler_state_dict = None
         self.best_metrics = None
-        
+
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self._cleanup_legacy_checkpoints()
 
@@ -47,8 +47,7 @@ class CheckpointManager:
                 pass
 
     def _cleanup_legacy_checkpoints(self):
-        """删除旧版遗留检查点，保持目录中只剩一个 .pt 文件。"""
-        # 删除旧版遗留检查点，最终仅保留 best_model.pt 与 last_state.pt
+        """删除旧版遗留检查点，仅保留 best_model.pt 与 last_state.pt。"""
         legacy_patterns = [
             os.path.join(self.checkpoint_dir, '*.pth'),
             os.path.join(self.checkpoint_dir, '*.pt'),
@@ -57,7 +56,6 @@ class CheckpointManager:
             for legacy_file in glob.glob(pattern):
                 try:
                     base = os.path.basename(legacy_file)
-                    # 保留 best_model.pt 与 last_state.pt，删除其他同类历史文件
                     if base not in ('best_model.pt', 'last_state.pt'):
                         os.remove(legacy_file)
                         print(f"删除旧检查点: {legacy_file}")
@@ -77,41 +75,22 @@ class CheckpointManager:
         if hasattr(model, 'state_dict'):
             return model.state_dict()
         raise TypeError(f'Unsupported model type for checkpoint saving: {type(model)}')
-    
+
     def save_checkpoint(self, model, optimizer, scheduler, epoch, metrics, is_best=False):
         """
-        保存检查点
-        
-        Args:
-            model: 模型
-            optimizer: 优化器
-            scheduler: 学习率调度器
-            epoch: 当前epoch
-            metrics: 评估指标字典
-            is_best: 是否是最好的模型
+        保存检查点。始终更新 last_state.pt，仅在 is_best 时更新 best_model.pt。
         """
-        # 保存 last_state.pt 用于恢复训练；仅在 is_best 时更新 best_model.pt
-        best_path = os.path.join(self.checkpoint_dir, 'best_model.pt')
-        last_path = os.path.join(self.checkpoint_dir, 'last_state.pt')
-
-        checkpoint = {}
-        if os.path.exists(last_path):
-            try:
-                checkpoint = torch.load(last_path, map_location='cpu')
-            except Exception:
-                checkpoint = {}
-
         last_model_state_dict = self._state_dict_for_model(model)
-        last_optimizer_state_dict = optimizer.state_dict() if optimizer else checkpoint.get('last_optimizer_state_dict')
-        last_scheduler_state_dict = scheduler.state_dict() if scheduler else checkpoint.get('last_scheduler_state_dict')
+        last_optimizer_state_dict = optimizer.state_dict() if optimizer else None
+        last_scheduler_state_dict = scheduler.state_dict() if scheduler else None
 
-        checkpoint.update({
+        checkpoint = {
             'epoch': epoch,
             'last_model_state_dict': last_model_state_dict,
             'last_optimizer_state_dict': last_optimizer_state_dict,
             'last_scheduler_state_dict': last_scheduler_state_dict,
             'last_metrics': metrics,
-        })
+        }
 
         metric_value = metrics.get(self.metric_name) if isinstance(metrics, dict) else None
         if is_best or (self.best_model_state_dict is None and metric_value is not None):
@@ -131,13 +110,17 @@ class CheckpointManager:
             'best_scheduler_state_dict': self.best_scheduler_state_dict,
             'best_metrics': self.best_metrics,
         })
-        # 总是保存 last_state.pt（用于恢复训练），但只在 is_best 时写入 best_model.pt
+
+        # 始终写入 last_state.pt
+        last_path = os.path.join(self.checkpoint_dir, 'last_state.pt')
         try:
             torch.save(checkpoint, last_path)
         except Exception:
             pass
 
+        # 仅在 is_best 时更新 best_model.pt
         if is_best:
+            best_path = os.path.join(self.checkpoint_dir, 'best_model.pt')
             try:
                 torch.save(checkpoint, best_path)
             except Exception:
@@ -145,6 +128,7 @@ class CheckpointManager:
             print(f"✓ 当前验证更新了最佳模型: {best_path}")
             print(f"  {self.metric_name}: {self.best_metric_value:.4f}")
 
+        # 清理非标准命名文件，仅保留 best_model.pt 与 last_state.pt
         try:
             for f in glob.glob(os.path.join(self.checkpoint_dir, '*.pt')):
                 if os.path.basename(f) not in ('best_model.pt', 'last_state.pt'):
@@ -154,34 +138,40 @@ class CheckpointManager:
                         pass
         except Exception:
             pass
-    
+
     def load_checkpoint(self, checkpoint_path, model, optimizer=None, scheduler=None, load_weights_only=False, use_best=False):
         """
-        加载检查点
-        
+        加载检查点。
+
         Args:
             checkpoint_path: 检查点路径
             model: 模型
-            optimizer: 优化器
-            scheduler: 学习率调度器
-            load_weights_only: 是否只加载权重（不恢复optimizer和epoch）
-        
+            optimizer: 优化器（可选，用于恢复训练状态）
+            scheduler: 学习率调度器（可选，用于恢复训练状态）
+            load_weights_only: 是否只加载权重
+            use_best: 是否使用 best_model_state_dict 而非 last_model_state_dict
+
         Returns:
-            epoch: 恢复的epoch
+            epoch: 恢复的 epoch 编号
         """
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"检查点不存在: {checkpoint_path}")
-        
+
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
         # 加载模型权重
         if use_best and checkpoint.get('best_model_state_dict') is not None:
             model_state = checkpoint['best_model_state_dict']
+            optimizer_key = 'best_optimizer_state_dict'
+            scheduler_key = 'best_scheduler_state_dict'
         else:
             model_state = checkpoint.get('last_model_state_dict', checkpoint.get('model_state_dict'))
+            optimizer_key = 'last_optimizer_state_dict'
+            scheduler_key = 'last_scheduler_state_dict'
+
         if model_state is None:
             raise KeyError(f"检查点缺少模型权重: {checkpoint_path}")
-        
+
         target_net = None
         if hasattr(model, 'net_G'):
             target_net = model.net_G
@@ -204,35 +194,39 @@ class CheckpointManager:
             if any(k.startswith('module.') for k in model_state.keys()):
                 model_state = {k[7:]: v for k, v in model_state.items()}
             target_net.load_state_dict(model_state)
-        
+
         print(f"✓ 加载模型权重")
-        
+
         # 恢复optimizer和scheduler
         if not load_weights_only:
             if optimizer:
-                optimizer_state = checkpoint.get('last_optimizer_state_dict', checkpoint.get('optimizer_state_dict'))
+                optimizer_state = checkpoint.get(optimizer_key, checkpoint.get('optimizer_state_dict'))
                 if optimizer_state:
                     optimizer.load_state_dict(optimizer_state)
-                print(f"✓ 恢复优化器状态")
-            
+                    print(f"✓ 恢复优化器状态")
+                else:
+                    print(f"⚠ 检查点中未找到优化器状态")
+
             if scheduler:
-                scheduler_state = checkpoint.get('last_scheduler_state_dict', checkpoint.get('scheduler_state_dict'))
+                scheduler_state = checkpoint.get(scheduler_key, checkpoint.get('scheduler_state_dict'))
                 if scheduler_state:
                     scheduler.load_state_dict(scheduler_state)
-                print(f"✓ 恢复学习率调度器状态")
-        
+                    print(f"✓ 恢复学习率调度器状态")
+                else:
+                    print(f"⚠ 检查点中未找到调度器状态")
+
         epoch = checkpoint.get('epoch', 0)
         print(f"✓ 恢复到 epoch {epoch}")
-        
+
         return epoch
-    
+
     def find_best_checkpoint(self):
         """找到最好的检查点"""
         best_ckpt = os.path.join(self.checkpoint_dir, f'{self.model_prefix}.pt')
         if os.path.exists(best_ckpt):
             return best_ckpt
         return None
-    
+
     def find_latest_checkpoint(self):
         """找到最新的检查点"""
         last_path = os.path.join(self.checkpoint_dir, 'last_state.pt')
@@ -248,25 +242,25 @@ class CheckpointManager:
         if not ckpt_files:
             return None
         return max(ckpt_files, key=os.path.getmtime)
-    
+
     def remove_old_checkpoints(self, keep_num=3):
         """
         删除旧的检查点（只保留最新的keep_num个）
-        
+
         Args:
             keep_num: 保留的检查点数量
         """
         pattern = os.path.join(self.checkpoint_dir, f'{self.model_prefix}*.pt')
         ckpt_files = sorted(glob.glob(pattern), key=os.path.getmtime)
-        
+
         # 最好的模型总是保留
         best_ckpt = os.path.join(self.checkpoint_dir, f'{self.model_prefix}.pt')
-        
+
         to_remove = []
         for ckpt in ckpt_files[:-keep_num]:
             if ckpt != best_ckpt:
                 to_remove.append(ckpt)
-        
+
         for ckpt in to_remove:
             try:
                 os.remove(ckpt)

@@ -186,35 +186,41 @@ def train(config, device):
     if is_distributed:
         dist.barrier()
     
-    # 恢复训练（如果启用）
+    # 提取优化器和调度器引用（在恢复前获取，以便传入 load_checkpoint）
+    optimizer = getattr(model, 'optimizers', [None])[0] if hasattr(model, 'optimizers') and len(getattr(model, 'optimizers', [])) > 0 else None
+    scheduler = getattr(model, 'schedulers', [None])[0] if hasattr(model, 'schedulers') and len(getattr(model, 'schedulers', [])) > 0 else None
+
+    # 恢复训练（如果启用）— 优先从 best_model.pt 恢复最佳权重
     start_epoch = 0
     if config.resume_training and config.checkpoint_path:
         print(f"\n从训练状态恢复: {config.checkpoint_path}")
         start_epoch = checkpoint_manager.load_checkpoint(
             config.checkpoint_path,
             model,
+            optimizer=optimizer,
+            scheduler=scheduler,
             load_weights_only=config.load_weights_only,
-            use_best=False
+            use_best=True
         )
     elif config.resume_training:
-        latest_ckpt = checkpoint_manager.find_latest_checkpoint()
-        if latest_ckpt:
-            print(f"\n从最新训练状态恢复: {latest_ckpt}")
+        best_ckpt = checkpoint_manager.find_best_checkpoint()
+        if best_ckpt:
+            print(f"\n从最佳模型恢复: {best_ckpt}")
             start_epoch = checkpoint_manager.load_checkpoint(
-                latest_ckpt,
+                best_ckpt,
                 model,
+                optimizer=optimizer,
+                scheduler=scheduler,
                 load_weights_only=config.load_weights_only,
-                use_best=False
+                use_best=True
             )
-    
+
     # 训练循环
-    print(f"\n开始训练 ({start_epoch}/{config.num_epochs} epochs)")
+    print(f"\n开始训练 (epoch {start_epoch + 1}/{config.num_epochs})")
     print("-" * 60)
-    
+
     best_metric = None
     metric_calc = MetricCalculator(config.crop_border)
-    optimizer = getattr(model, 'optimizers', [None])[0] if hasattr(model, 'optimizers') and len(getattr(model, 'optimizers', [])) > 0 else None
-    scheduler = getattr(model, 'schedulers', [None])[0] if hasattr(model, 'schedulers') and len(getattr(model, 'schedulers', [])) > 0 else None
     
     for epoch in range(start_epoch, config.num_epochs):
         if is_distributed and train_sampler is not None:
@@ -235,7 +241,7 @@ def train(config, device):
             if train_logger is not None:
                 train_logger.log(f"Epoch {epoch + 1}/{config.num_epochs} - LR: {current_lr:.6f}")
 
-        # 保存当前训练状态（统一保存在主进程）
+        # 保存当前训练状态（每轮保存完整状态，支持任意轮断点续训）
         if is_main_process:
             checkpoint_manager.save_checkpoint(
                 model,
@@ -269,7 +275,7 @@ def train(config, device):
                     if is_best:
                         best_metric = current_metric
                 
-                # 保存检查点
+                # 保存检查点（使用 epoch 编号保存）
                 if is_best or not config.save_best_only:
                     checkpoint_manager.save_checkpoint(
                         model,
