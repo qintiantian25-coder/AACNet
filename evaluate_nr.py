@@ -28,7 +28,7 @@ INPUT_DIR  = r"/root/Qtt/AACNet/real_image/test_blur"
 SAVE_DIR   = r"/root/Qtt/AACNet/results/aacnet_blind_test/nr_eval"
 
 # Residual 阈值: 盲元绝对误差超过此灰度级即视为残余缺陷
-RESIDUAL_THRESHOLDS = [10, 20, 30, 50]
+RESIDUAL_THRESHOLDS = [5, 10, 20, 30, 50]
 
 
 # =====================================================================
