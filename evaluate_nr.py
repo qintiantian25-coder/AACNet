@@ -9,26 +9,28 @@
 不依赖 RGB 预训练模型, 纯数学计算, 天然适配灰度红外图像.
 
 用法:
-  python evaluate_nr.py
+  python evaluate_nr.py --output <修复图目录> --input <输入图目录> --save <保存目录>
 """
 
 import os
 import re
 import csv
+import argparse
 import cv2
 import numpy as np
 
 
 # =====================================================================
-# 配置
+# 默认配置 (可通过命令行覆盖)
 # =====================================================================
 
-OUTPUT_DIR = r"/root/Qtt/AACNet/results/aacnet_blind_test/test"
-INPUT_DIR  = r"/root/Qtt/AACNet/real_image/test_blur"
-SAVE_DIR   = r"/root/Qtt/AACNet/results/aacnet_blind_test/nr_eval"
+DEFAULTS = {
+    'output': r"/root/Qtt/AACNet/results/aacnet_blind_test/test",
+    'input':  r"/root/Qtt/AACNet/real_image/test_blur",
+    'save':   r"/root/Qtt/AACNet/results/aacnet_blind_test/nr_eval",
+}
 
-# Residual 阈值: 盲元绝对误差超过此灰度级即视为残余缺陷
-RESIDUAL_THRESHOLDS = [5, 10, 20, 30, 50]
+DEFAULT_THRESHOLDS = [5, 10, 20, 30, 50]
 
 
 # =====================================================================
@@ -110,6 +112,19 @@ def _resolve_path(base_dir, seq_name, rel_path, img_name):
 # =====================================================================
 
 def main():
+    parser = argparse.ArgumentParser()
+    for k, v in DEFAULTS.items():
+        parser.add_argument(f'--{k}', default=v)
+    parser.add_argument('--thresholds', nargs='+', type=int, default=DEFAULT_THRESHOLDS)
+    args = parser.parse_args()
+
+    global RESIDUAL_THRESHOLDS
+    RESIDUAL_THRESHOLDS = args.thresholds
+
+    OUTPUT_DIR = args.output
+    INPUT_DIR  = args.input
+    SAVE_DIR   = args.save
+
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     # 扫描输出目录
@@ -131,7 +146,6 @@ def main():
     for r in out_records:
         seq_records.setdefault(r['seq'], []).append(r)
 
-    # 构建列名: residual_{10,20,30,50}, localstd, estsnr 各 × out/in
     METRICS = ([f'residual_{t}' for t in RESIDUAL_THRESHOLDS] +
                ['localstd', 'estsnr'])
     DIRECTION = {}
