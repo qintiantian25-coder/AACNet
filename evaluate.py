@@ -31,7 +31,7 @@ DEFAULTS = {
     'save':   r"/root/Qtt/AACNet/results/aacnet_blind_test/blind_eval",
 }
 
-OPERABLE_THRESHOLD = 10.0
+_THRESHOLD = 10.0
 
 # =====================================================================
 # 工具函数
@@ -130,10 +130,10 @@ def main():
     parser = argparse.ArgumentParser()
     for k, v in DEFAULTS.items():
         parser.add_argument(f'--{k}', default=v)
-    parser.add_argument('--threshold', type=float, default=OPERABLE_THRESHOLD)
+    parser.add_argument('--threshold', type=float, default=_THRESHOLD)
     args = parser.parse_args()
 
-    OPERABLE_THRESHOLD = args.threshold
+    threshold = args.threshold
 
     OUTPUT_DIR = args.output
     GT_DIR     = args.gt
@@ -280,7 +280,7 @@ def main():
 
             # 有效像元率 (全图, 非仅盲区)
             full_err = out_img.astype(np.float64) - gt_img.astype(np.float64)
-            operable_all = int((np.abs(full_err) < OPERABLE_THRESHOLD).sum())
+            operable_all = int((np.abs(full_err) < threshold).sum())
             row['operable_rate'] = round(100.0 * operable_all / (h * w), 2)
             sst['operable_count'] += operable_all
             sst['total_pixels'] += (h * w)
@@ -415,7 +415,7 @@ def main():
     total_pix = global_stats.get('total_pixels', 0)
     if total_pix > 0:
         oper_rate = 100.0 * global_stats['operable_count'] / total_pix
-        print(f"有效像元率 (全图, 阈值={OPERABLE_THRESHOLD:.0f}): {oper_rate:.2f}%")
+        print(f"有效像元率 (全图, 阈值={threshold:.0f}): {oper_rate:.2f}%")
         if global_stats['blind_abs_in'] > 0:
             in_mae = global_stats['blind_abs_in'] / pix
             in_psnr = blind_psnr_from_stats(global_stats['blind_abs_in'], global_stats['blind_sq_in'], pix)
