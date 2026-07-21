@@ -25,9 +25,9 @@ import numpy as np
 # =====================================================================
 
 DEFAULTS = {
-    'output': r"/root/Qtt/AACNet/results/aacnet_blind_test/test",
+    'output': r"/root/Qtt/AACNet/results_real/aacnet_blind_test/test",
     'input':  r"/root/Qtt/AACNet/real_image/test_blur",
-    'save':   r"/root/Qtt/AACNet/results/aacnet_blind_test/nr_eval",
+    'save':   r"/root/Qtt/AACNet/results_real/aacnet_blind_test/nr_eval",
 }
 
 DEFAULT_THRESHOLDS = [5, 10, 20, 30, 50]
@@ -118,7 +118,6 @@ def main():
     parser.add_argument('--thresholds', nargs='+', type=int, default=DEFAULT_THRESHOLDS)
     args = parser.parse_args()
 
-    global RESIDUAL_THRESHOLDS
     RESIDUAL_THRESHOLDS = args.thresholds
 
     OUTPUT_DIR = args.output
