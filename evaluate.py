@@ -25,9 +25,9 @@ import numpy as np
 
 DEFAULTS = {
     'output': r"/root/Qtt/AACNet/results/aacnet_blind_test/test",
-    'gt':     r"/root/Qtt/AACNet/real_image/test_sharp",
-    'input':  r"/root/Qtt/AACNet/real_image/test_blur",
-    'mask':   r"/root/Qtt/AACNet/real_image/test_mask",
+    'gt':     r"/root/Qtt/AACNet/data_new/test_sharp",
+    'input':  r"/root/Qtt/AACNet/data_new/test_blur",
+    'mask':   r"/root/Qtt/AACNet/data_new/test_mask",
     'save':   r"/root/Qtt/AACNet/results/aacnet_blind_test/blind_eval",
 }
 
@@ -133,7 +133,6 @@ def main():
     parser.add_argument('--threshold', type=float, default=OPERABLE_THRESHOLD)
     args = parser.parse_args()
 
-    global OPERABLE_THRESHOLD
     OPERABLE_THRESHOLD = args.threshold
 
     OUTPUT_DIR = args.output
