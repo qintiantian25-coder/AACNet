@@ -159,8 +159,8 @@ class DAttentionBaseline_gate_factor(nn.Module):
         #     pos = (offset + reference).tanh()
 
         x_sampled = F.grid_sample(
-            input=x.reshape(B * self.n_groups, self.n_group_channels, H, W),
-            grid=pos[..., (1, 0)],  # y, x -> x, y
+            input=x.reshape(B * self.n_groups, self.n_group_channels, H, W).contiguous(),
+            grid=pos[..., (1, 0)].contiguous(),  # y, x -> x, y
             mode='bilinear', align_corners=True)  # B * g, Cg, Hg, Wg
 
         x_sampled = x_sampled.reshape(B, C, 1, n_sample)
