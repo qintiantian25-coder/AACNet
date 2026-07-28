@@ -118,14 +118,13 @@ def main():
             # 归一化到 [-1, 1]
             img_norm = (img_pad / 255.0) * 2.0 - 1.0
 
-            # 构造 4 通道输入: [blur(RGB), mask]
+            # Generator.forward 内部会 torch.cat([x, mask], dim=1)，所以 x 只传 3 通道
             blur_3ch = np.stack([img_norm] * 3, axis=0)  # [3, H, W]
             mask_1ch = mask[np.newaxis, ...]               # [1, H, W]
-            x = np.concatenate([blur_3ch, mask_1ch], axis=0)  # [4, H, W]
-            x = torch.from_numpy(x).unsqueeze(0).float().to(device)
+            x = torch.from_numpy(blur_3ch).unsqueeze(0).float().to(device)
+            mask_t = torch.from_numpy(mask_1ch).unsqueeze(0).to(device)
 
             # 推理
-            mask_t = torch.from_numpy(mask_1ch).unsqueeze(0).to(device)
             out, _ = net(x, mask=mask_t)
 
             # 后处理
