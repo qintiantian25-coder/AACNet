@@ -125,7 +125,8 @@ def main():
             x = torch.from_numpy(x).unsqueeze(0).float().to(device)
 
             # 推理
-            out, _ = net(x, mask_1ch=torch.from_numpy(mask_1ch).unsqueeze(0).to(device))
+            mask_t = torch.from_numpy(mask_1ch).unsqueeze(0).to(device)
+            out, _ = net(x, mask=mask_t)
 
             # 后处理
             out = out.squeeze(0).cpu().numpy()  # [3, H, W]
