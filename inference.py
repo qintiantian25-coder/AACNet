@@ -29,7 +29,7 @@ from util.checkpoint_manager import CheckpointManager
 
 DEFAULTS = {
     'checkpoint': r"/root/Qtt/AACNet/experiments_real/models/best_model.pt",
-    'output': r"/root/Qtt/AACNet/results_infer",
+    'output': r"/root/Qtt/AACNet/results_real/lwir_infer",
     'gpu': 0,
 }
 
