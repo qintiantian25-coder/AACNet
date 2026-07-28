@@ -203,8 +203,8 @@ class DAttentionBaseline_gate_factor(nn.Module):
                     0.5)
 
                 attn_bias = F.grid_sample(
-                    input=rpe_bias.reshape(B * self.n_groups, self.n_group_heads, 2 * H - 1, 2 * W - 1),
-                    grid=displacement[..., (1, 0)],
+                    input=rpe_bias.reshape(B * self.n_groups, self.n_group_heads, 2 * H - 1, 2 * W - 1).contiguous(),
+                    grid=displacement[..., (1, 0)].contiguous(),
                     mode='bilinear', align_corners=True
                 )  # B * g, h_g, HW, Ns
 
