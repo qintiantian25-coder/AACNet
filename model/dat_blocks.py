@@ -158,10 +158,11 @@ class DAttentionBaseline_gate_factor(nn.Module):
         # else:
         #     pos = (offset + reference).tanh()
 
-        x_sampled = F.grid_sample(
-            input=x.reshape(B * self.n_groups, self.n_group_channels, H, W).contiguous(),
-            grid=pos[..., (1, 0)].contiguous(),  # y, x -> x, y
-            mode='bilinear', align_corners=True)  # B * g, Cg, Hg, Wg
+        with torch.backends.cudnn.flags(enabled=False):
+            x_sampled = F.grid_sample(
+                input=x.reshape(B * self.n_groups, self.n_group_channels, H, W).contiguous(),
+                grid=pos[..., (1, 0)].contiguous(),  # y, x -> x, y
+                mode='bilinear', align_corners=True)  # B * g, Cg, Hg, Wg
 
         x_sampled = x_sampled.reshape(B, C, 1, n_sample)
 
@@ -202,11 +203,12 @@ class DAttentionBaseline_gate_factor(nn.Module):
                                                                                                    2).unsqueeze(1)).mul(
                     0.5)
 
-                attn_bias = F.grid_sample(
-                    input=rpe_bias.reshape(B * self.n_groups, self.n_group_heads, 2 * H - 1, 2 * W - 1).contiguous(),
-                    grid=displacement[..., (1, 0)].contiguous(),
-                    mode='bilinear', align_corners=True
-                )  # B * g, h_g, HW, Ns
+                with torch.backends.cudnn.flags(enabled=False):
+                    attn_bias = F.grid_sample(
+                        input=rpe_bias.reshape(B * self.n_groups, self.n_group_heads, 2 * H - 1, 2 * W - 1).contiguous(),
+                        grid=displacement[..., (1, 0)].contiguous(),
+                        mode='bilinear', align_corners=True
+                    )  # B * g, h_g, HW, Ns
 
                 attn_bias = attn_bias.reshape(B * self.n_heads, H * W, n_sample)
 
